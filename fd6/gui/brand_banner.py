@@ -12,11 +12,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QFont, QPixmap, QIcon, QMouseEvent
+from PySide6.QtCore import Qt, QSize, QUrl
+from PySide6.QtGui import QFont, QPixmap, QIcon, QMouseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 )
+
+
+TOKYUBE_URL = "https://tokyube.com"
+DISCORD_INVITE_URL = "https://discord.gg/PJFWdykGmS"
 
 
 def _bundle_root() -> Path:
@@ -39,7 +43,16 @@ def badge_path(filename: str) -> Path | None:
 
 
 def _logo_path() -> Path | None:
-    """Default badge — pink for the Default theme."""
+    """Initial badge path — matches the currently saved theme so the brand
+    banner shows the correct color immediately at startup (no flash of Pink
+    before _set_theme runs)."""
+    try:
+        from fd6.gui.themes import badge_filename_for_theme, saved_theme_name
+        p = badge_path(badge_filename_for_theme(saved_theme_name()))
+        if p:
+            return p
+    except Exception:
+        pass
     return badge_path("Pink.png") or badge_path("AppIconTransparent.png")
 
 
@@ -47,13 +60,25 @@ class BrandBanner(QWidget):
     """Brand banner that sits in the bottom-left corner. Click panel to collapse / click pill to expand."""
 
     MARGIN = 12
-    BANNER_HEIGHT = 56
-    BANNER_WIDTH = 240
+    # Taller now to accommodate two CTA buttons stacked above the icon/title row:
+    #   row 1: tokyube.com (rainbow)
+    #   row 2: Join the Imagineers (Discord orange — matches the tokyube site button)
+    #   row 3: icon + Forza Designer 6 title (existing)
+    BANNER_HEIGHT = 148
+    BANNER_WIDTH = 260
     PILL_SIZE = 40
+    CTA_HEIGHT = 30
 
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
-        self.setAttribute(Qt.WA_StyledBackground, True)
+        # Make the banner widget itself transparent. Without this, the global
+        # theme QSS paints a `bg` colored 40x40 square behind the round pill
+        # button when collapsed, producing dark square corners around the icon.
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        # Explicit per-widget override so the global `QWidget { background: ... }`
+        # in themes.py can't repaint behind us.
+        self.setStyleSheet("BrandBanner { background: transparent; }")
 
         logo = _logo_path()
         self._pix: QPixmap | None = None
@@ -72,15 +97,55 @@ class BrandBanner(QWidget):
         self.panel.setCursor(Qt.PointingHandCursor)
         self.panel.setFixedSize(self.BANNER_WIDTH, self.BANNER_HEIGHT)
 
-        ph = QHBoxLayout(self.panel)
-        ph.setContentsMargins(10, 8, 10, 8)
-        ph.setSpacing(10)
+        # Vertical panel layout: [tokyube CTA] [discord CTA] [icon + title row]
+        outer = QVBoxLayout(self.panel)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(6)
+
+        # ── CTA 1: tokyube.com (rainbow gradient, white text) ────────────────
+        self.tokyube_btn = QPushButton("tokyube.com", self.panel)
+        self.tokyube_btn.setCursor(Qt.PointingHandCursor)
+        self.tokyube_btn.setFixedHeight(self.CTA_HEIGHT)
+        self.tokyube_btn.setStyleSheet(
+            "QPushButton {"
+            " background: qlineargradient(x1:0, y1:0, x2:1, y2:0,"
+            "  stop:0 #ff0000, stop:0.166 #ff8800, stop:0.333 #ffff00,"
+            "  stop:0.5 #00ff00, stop:0.666 #00ffff, stop:0.833 #8800ff,"
+            "  stop:1 #ff00ff);"
+            " color: #000000; font-weight: bold; letter-spacing: 1px;"
+            " border: 1px solid #000; border-radius: 6px; padding: 0 10px; }"
+            "QPushButton:hover { border-color: #fff; }"
+        )
+        self.tokyube_btn.setToolTip("Open tokyube.com")
+        self.tokyube_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(TOKYUBE_URL)))
+        outer.addWidget(self.tokyube_btn)
+
+        # ── CTA 2: Join the Imagineers (matches site .btn-discord orange) ────
+        self.discord_btn = QPushButton("Join the Imagineers", self.panel)
+        self.discord_btn.setCursor(Qt.PointingHandCursor)
+        self.discord_btn.setFixedHeight(self.CTA_HEIGHT)
+        self.discord_btn.setStyleSheet(
+            "QPushButton {"
+            " background: qlineargradient(x1:0, y1:0, x2:1, y2:1,"
+            "  stop:0 #ffd9a8, stop:0.4 #ff8c1a, stop:1 #b35400);"
+            " color: #000000; font-weight: bold; letter-spacing: 0.5px;"
+            " border: 1px solid #6b3000; border-radius: 6px; padding: 0 10px; }"
+            "QPushButton:hover { border-color: #fff; }"
+        )
+        self.discord_btn.setToolTip(f"Open Discord invite ({DISCORD_INVITE_URL})")
+        self.discord_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(DISCORD_INVITE_URL)))
+        outer.addWidget(self.discord_btn)
+
+        # ── Row 3: icon + title (existing) ───────────────────────────────────
+        bottom_row = QHBoxLayout()
+        bottom_row.setContentsMargins(0, 0, 0, 0)
+        bottom_row.setSpacing(10)
         self.icon_label = QLabel(self.panel)
         self.icon_label.setFixedSize(40, 40)
         self.icon_label.setAlignment(Qt.AlignCenter)
         if self._pix:
             self.icon_label.setPixmap(self._pix.scaled(40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        ph.addWidget(self.icon_label)
+        bottom_row.addWidget(self.icon_label)
 
         text_col = QVBoxLayout()
         text_col.setContentsMargins(0, 0, 0, 0)
@@ -89,11 +154,12 @@ class BrandBanner(QWidget):
         tf = QFont(); tf.setBold(True); tf.setPointSize(10)
         self.title_label.setFont(tf)
         self.title_label.setStyleSheet("color: #f0f0f0;")
-        self.sub_label = QLabel("Click to hide", self.panel)
+        self.sub_label = QLabel("Click here to hide", self.panel)
         self.sub_label.setStyleSheet("color: #888; font-size: 10px;")
         text_col.addWidget(self.title_label)
         text_col.addWidget(self.sub_label)
-        ph.addLayout(text_col, stretch=1)
+        bottom_row.addLayout(text_col, stretch=1)
+        outer.addLayout(bottom_row)
 
         # ---- collapsed pill (icon-only button)
         self.pill = QPushButton(self)

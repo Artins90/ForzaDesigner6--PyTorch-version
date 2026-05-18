@@ -38,6 +38,12 @@ class PreviewPanel(QWidget):
     def set_source(self, path: str | Path) -> None:
         self.source_view.set_path(str(path))
         self.preview_view.clear_image()
+        self.progress.setValue(0)
+        self.status_label.setText(
+            "Idle — give the FD6 engine a moment to start. "
+            "First-shape startup can take anywhere from a few seconds to several "
+            "minutes depending on profile (random/mutated samples) and image size."
+        )
 
     def on_progress(self, count: int, total: int, rms: float) -> None:
         pct = int(round(100 * count / max(1, total)))

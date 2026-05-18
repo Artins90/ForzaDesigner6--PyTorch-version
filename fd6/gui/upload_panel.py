@@ -4,11 +4,16 @@ from pathlib import Path
 
 from PySide6.QtCore import Signal, Qt, QTimer
 from PySide6.QtWidgets import (
-    QFileDialog, QHBoxLayout, QListWidget, QPushButton, QVBoxLayout, QWidget, QLabel
+    QFileDialog, QHBoxLayout, QListWidget, QPushButton, QStackedWidget,
+    QVBoxLayout, QWidget, QLabel,
 )
 
 from fd6.gui.widgets import DropZone
 from fd6.gui.widgets.drop_zone import SUPPORTED_EXTS
+# Note: fd6.gui.image_search is NOT imported at module load — that would force
+# QWebEngine (Chromium, ~150MB renderer process) to spin up at startup even
+# for users who never toggle the image searcher on. We lazy-import it inside
+# `set_use_image_searcher()` the first time the toggle flips on.
 
 
 class UploadPanel(QWidget):
@@ -53,11 +58,43 @@ class UploadPanel(QWidget):
         layout.addLayout(json_row)
 
         layout.addSpacing(4)
-        layout.addWidget(QLabel("Recent:"))
-        self.recent_list = QListWidget(self)
-        self.recent_list.setStyleSheet("QListWidget { background: #181818; border: 1px solid #2a2a2a; }")
+        # Label tracks which panel is showing — flips when Customizations
+        # toggle is flipped.
+        self.section_label = QLabel("Recent:", self)
+        layout.addWidget(self.section_label)
+        # Stack the Recents list and Image Searcher; we swap by changing the
+        # current index from the View → Customizations menu toggle.
+        self.stack = QStackedWidget(self)
+        self.recent_list = QListWidget(self.stack)
+        self.recent_list.setObjectName("ThemeGlow")
         self.recent_list.itemDoubleClicked.connect(self._on_recent_dbl)
-        layout.addWidget(self.recent_list, stretch=1)
+        self.stack.addWidget(self.recent_list)   # index 0 — recents
+        # image_search panel is created lazily on first toggle (see below)
+        self.image_search = None
+        layout.addWidget(self.stack, stretch=1)
+
+    def _ensure_image_search(self) -> None:
+        """Construct ImageSearchPanel + Chromium renderer on first use."""
+        if self.image_search is not None:
+            return
+        from fd6.gui.image_search import ImageSearchPanel
+        self.image_search = ImageSearchPanel(self.stack)
+        self.image_search.image_downloaded.connect(self._on_downloaded_image)
+        self.stack.addWidget(self.image_search)   # index 1 — searcher
+
+    def set_use_image_searcher(self, enabled: bool) -> None:
+        """Wired to the View → Customizations toggle."""
+        if enabled:
+            self._ensure_image_search()
+            self.stack.setCurrentIndex(1)
+            self.section_label.setText("Image search:")
+        else:
+            self.stack.setCurrentIndex(0)
+            self.section_label.setText("Recent:")
+
+    def _on_downloaded_image(self, path: Path) -> None:
+        # Feed the downloaded image through the same path as an Upload click
+        self._emit([Path(path)])
 
     def _on_upload_clicked(self) -> None:
         exts = " ".join(f"*{e}" for e in sorted(SUPPORTED_EXTS))

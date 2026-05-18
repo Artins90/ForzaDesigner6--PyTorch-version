@@ -130,6 +130,8 @@ class Engine:
             types = ["rotated_ellipse"]
         save_at = set(p.save_at)
         try:
+            consecutive_skips = 0
+            MAX_CONSECUTIVE_SKIPS = 80   # hard watchdog so the loop can never hang
             while len(self.shapes) < p.stop_at and not self._stop:
                 while self._pause and not self._stop:
                     time.sleep(0.05)
@@ -137,6 +139,38 @@ class Engine:
                 candidate = self._best_of_random(types, max(1, p.random_samples))
                 # Hill climb
                 refined = self._hill_climb(candidate, max(1, p.mutated_samples))
+                # Sticker mode: a shape must fit ESSENTIALLY ENTIRELY inside
+                # the opaque region (score_shape enforces STICKER_OVERLAP_MIN).
+                # If not, retry up to 5 times then SKIP this iteration entirely
+                # — committing a bad shape would inject as a solid blob in FH6.
+                if self.alpha_mask is not None:
+                    sticker_attempts = 0
+                    while sticker_attempts < 5:
+                        rscore, _ = score_shape(refined, self.canvas, self.target, self.alpha_mask)
+                        if rscore != float("inf"):
+                            break
+                        candidate = self._best_of_random(types, max(1, p.random_samples))
+                        refined = self._hill_climb(candidate, max(1, p.mutated_samples))
+                        sticker_attempts += 1
+                    else:
+                        # All 5 attempts produced bleeding shapes — skip this iteration
+                        consecutive_skips += 1
+                        if consecutive_skips >= MAX_CONSECUTIVE_SKIPS:
+                            yield EngineEvent(
+                                kind="done",
+                                shape_count=len(self.shapes),
+                                rms=self.rms,
+                                canvas=self.canvas.copy(),
+                                message=(
+                                    f"Stopped early at {len(self.shapes)} shapes — couldn't "
+                                    f"fit any more inside the opaque region after {MAX_CONSECUTIVE_SKIPS} "
+                                    "consecutive attempts. Try increasing 'Random samples' or "
+                                    "enabling smaller shape types."
+                                ),
+                            )
+                            return
+                        continue
+                    consecutive_skips = 0
                 # Commit
                 new_canvas, new_rms = composite(self.canvas, refined, self.target, self.alpha_mask)
                 if new_rms >= self.rms:

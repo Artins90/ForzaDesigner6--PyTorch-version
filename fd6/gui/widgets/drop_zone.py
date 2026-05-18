@@ -18,18 +18,16 @@ class DropZone(QFrame):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setAcceptDrops(True)
-        self.setObjectName("dropZone")
+        # Use the shared "ThemeGlow" styling defined in themes.py — gives the
+        # drop zone a theme-tinted background and dashed accent border.
+        self.setObjectName("ThemeGlow")
         self.setFrameShape(QFrame.StyledPanel)
         self.setMinimumHeight(110)
         layout = QVBoxLayout(self)
         self._label = QLabel("Drop images here\n(or use the Upload button)", self)
         self._label.setAlignment(Qt.AlignCenter)
-        self._label.setStyleSheet("color: #888; font-size: 12px;")
+        self._label.setStyleSheet("font-size: 12px;")
         layout.addWidget(self._label)
-        self.setStyleSheet(
-            "QFrame#dropZone { border: 2px dashed #555; border-radius: 8px; background: #1f1f1f; }"
-            "QFrame#dropZone[dragOver='true'] { border-color: #3a7bd5; background: #243044; }"
-        )
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():

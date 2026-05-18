@@ -38,8 +38,10 @@ desktop.ini
 .fd6_*.pkl
 .fd6_*.json
 
-# Local test inputs left in repo root
+# Local test inputs + generation outputs left in repo root
 BluePsyduckTest*.json
+Blue/
+*_checkpoints/
 
 # RE workshop notes — kept locally, not pushed
 memory*.md

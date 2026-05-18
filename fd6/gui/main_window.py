@@ -78,6 +78,37 @@ class MainWindow(QMainWindow):
         # Floating brand banner in bottom-left (toggleable)
         self.brand_banner = BrandBanner(self)
         self.brand_banner.show()
+        # Make sure the brand banner + window icon match the persisted theme
+        # right at construction time (was previously only synced on theme change,
+        # so launches would briefly show the Default Pink badge for non-Default
+        # themes).
+        from PySide6.QtGui import QIcon
+        _saved_theme = saved_theme_name()
+        _bp = badge_path(badge_filename_for_theme(_saved_theme))
+        if _bp:
+            self.setWindowIcon(QIcon(str(_bp)))
+            self.brand_banner.set_badge(_bp)
+
+        # Decorative particle overlay (theme-colored, transparent, click-through).
+        # Constructed AFTER brand_banner so we can raise it above everything.
+        from fd6.gui.particles import ParticleOverlay
+        self.particles = ParticleOverlay(self)
+        _pal = THEMES.get(_saved_theme, THEMES["Default"])
+        self.particles.set_theme_colors(
+            _pal["particle_1"], _pal["particle_2"], _pal["particle_3"],
+        )
+        self.particles.reposition()
+        # Register a live exclude-rect provider so the rect stays correct even
+        # when the user drags the splitter (which doesn't trigger MainWindow's
+        # resizeEvent). Provider is called every particle paintEvent.
+        self.particles.set_exclude_provider(self._compute_particle_exclude_rect)
+        # Still call the push path once so the cached fallback is populated.
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, self._sync_particle_exclude_rect)
+        # Initial state of menu actions (built in _build_menus before this point)
+        if hasattr(self, "_particles_enabled_act"):
+            self._particles_enabled_act.setChecked(self.particles.enabled())
+            self._sync_particle_count_check(self.particles.count())
 
         # Background music: 3 looping OpenSource tracks. Construct now (cheap),
         # but DEFER starting until start_music() is called from app.py after the
@@ -168,6 +199,60 @@ class MainWindow(QMainWindow):
             self._music_vol_group.addAction(a)
             vol_menu.addAction(a)
 
+        # --- Fonts submenu (Default + every bundled TTF/OTF) ------------------
+        view_menu.addSeparator()
+        fonts_menu = view_menu.addMenu("F&onts")
+        from fd6.gui.fonts import (
+            available_family_names as _font_names, saved_font_name as _saved_font,
+        )
+        self._font_group = QActionGroup(self)
+        self._font_group.setExclusive(True)
+        current_font = _saved_font()
+        for fname in _font_names():
+            a = QAction(fname, self, checkable=True)
+            a.setChecked(fname == current_font)
+            a.triggered.connect(lambda _c, name=fname: self._on_font_pick(name))
+            self._font_group.addAction(a)
+            fonts_menu.addAction(a)
+
+        # --- Customizations submenu (panel-swap toggles, persisted) ----------
+        view_menu.addSeparator()
+        custom_menu = view_menu.addMenu("&Customizations")
+        self._swap_recents_act = QAction("&Swap recents with image searcher", self, checkable=True)
+        self._swap_recents_act.setStatusTip(
+            "Replace the Recent files list with a Google-style image search panel "
+            "that downloads PNGs straight into the generation queue."
+        )
+        from PySide6.QtCore import QSettings as _QS
+        _cs = _QS("FD6", "Forza Designer 6")
+        _cs.beginGroup("customizations")
+        _init_swap = _cs.value("swap_recents_with_image_searcher", False, type=bool)
+        _cs.endGroup()
+        self._swap_recents_act.setChecked(_init_swap)
+        self._swap_recents_act.triggered.connect(self._on_swap_recents_toggled)
+        custom_menu.addAction(self._swap_recents_act)
+        # Apply the persisted state to the upload panel right away
+        if hasattr(self, "upload"):
+            self.upload.set_use_image_searcher(_init_swap)
+
+        # --- Particles submenu (theme-colored animated overlay) --------------
+        view_menu.addSeparator()
+        particles_menu = view_menu.addMenu("&Particles")
+        self._particles_enabled_act = QAction("&Show particles", self, checkable=True)
+        self._particles_enabled_act.triggered.connect(self._on_particles_toggle)
+        particles_menu.addAction(self._particles_enabled_act)
+        particles_menu.addSeparator()
+        density_menu = particles_menu.addMenu("&Density")
+        self._particle_count_group = QActionGroup(self)
+        self._particle_count_group.setExclusive(True)
+        from fd6.gui.particles import COUNT_OPTIONS
+        for n in COUNT_OPTIONS:
+            label = "Off (0)" if n == 0 else f"{n} particles"
+            a = QAction(label, self, checkable=True)
+            a.triggered.connect(lambda _c, count=n: self._on_particles_count(count))
+            self._particle_count_group.addAction(a)
+            density_menu.addAction(a)
+
         fh6_menu = mbar.addMenu("F&H6")
         status_act = QAction("FH6 &Status…", self)
         status_act.triggered.connect(self._show_fh6_status)
@@ -196,7 +281,50 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(QIcon(str(bp)))
             if hasattr(self, "brand_banner"):
                 self.brand_banner.set_badge(bp)
+        # Recolor particle overlay with the theme's particle palette
+        if hasattr(self, "particles"):
+            pal = THEMES.get(theme_name, THEMES["Default"])
+            self.particles.set_theme_colors(
+                pal["particle_1"], pal["particle_2"], pal["particle_3"],
+            )
         self.statusBar().showMessage(f"Theme: {theme_name}", 3000)
+
+    # -------- customizations --------
+    def _on_swap_recents_toggled(self, checked: bool) -> None:
+        from PySide6.QtCore import QSettings
+        if hasattr(self, "upload"):
+            self.upload.set_use_image_searcher(checked)
+        s = QSettings("FD6", "Forza Designer 6")
+        s.beginGroup("customizations")
+        s.setValue("swap_recents_with_image_searcher", checked)
+        s.endGroup()
+
+    # -------- font handler --------
+    def _on_font_pick(self, display_name: str) -> None:
+        from PySide6.QtWidgets import QApplication
+        from fd6.gui.fonts import apply_font
+        apply_font(QApplication.instance(), display_name)
+        self.statusBar().showMessage(f"Font: {display_name}", 3000)
+
+    # -------- particle handlers --------
+    def _on_particles_toggle(self, checked: bool) -> None:
+        if hasattr(self, "particles"):
+            self.particles.set_enabled(checked)
+
+    def _on_particles_count(self, count: int) -> None:
+        if hasattr(self, "particles"):
+            self.particles.set_count(count)
+            # Disabling via count==0 should also untick the Show particles action
+            self._particles_enabled_act.setChecked(self.particles.enabled() and count > 0)
+
+    def _sync_particle_count_check(self, n: int) -> None:
+        for act in self._particle_count_group.actions():
+            # Action labels are "Off (0)" or "N particles"
+            t = act.text()
+            digits = "".join(c for c in t.split()[0] if c.isdigit())
+            if digits.isdigit() and int(digits) == n:
+                act.setChecked(True)
+                return
 
     # -------- music handlers --------
     def _music_toggle_play(self) -> None:
@@ -530,6 +658,31 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, "brand_banner") and self.brand_banner is not None:
             self.brand_banner.reposition()
+        if hasattr(self, "particles") and self.particles is not None:
+            self.particles.reposition()
+            self._sync_particle_exclude_rect()
+            # Keep brand banner on top of the particle layer so it stays clickable
+            if hasattr(self, "brand_banner"):
+                self.brand_banner.raise_()
+
+    def _compute_particle_exclude_rect(self):
+        """Live rect provider: returns the preview panel's current rect in
+        MainWindow client coords (== the particle overlay's coord space)."""
+        if not hasattr(self, "preview") or self.preview is None:
+            return None
+        if self.preview.width() <= 0 or self.preview.height() <= 0:
+            return None
+        from PySide6.QtCore import QRect
+        top_left = self.preview.mapTo(self, self.preview.rect().topLeft())
+        return QRect(top_left, self.preview.size())
+
+    def _sync_particle_exclude_rect(self) -> None:
+        """Push the current exclude rect once (cached fallback path)."""
+        if not hasattr(self, "particles") or self.particles is None:
+            return
+        excl = self._compute_particle_exclude_rect()
+        if excl is not None:
+            self.particles.set_exclude_rect(excl)
 
     def closeEvent(self, event) -> None:
         if self._worker:
@@ -537,4 +690,11 @@ class MainWindow(QMainWindow):
             if self._thread:
                 self._thread.quit()
                 self._thread.wait(3000)
+        # Stop any pending image-search webview cleanly (lazy-init: may be None)
+        try:
+            if (hasattr(self, "upload")
+                    and getattr(self.upload, "image_search", None) is not None):
+                self.upload.image_search.shutdown()
+        except Exception:
+            pass
         super().closeEvent(event)

@@ -86,9 +86,12 @@ class InjectionDialog(QDialog):
             "operation is running will cause the in-game vinyl group's memory to be "
             "reallocated mid-write, which will fail the injection. Please leave the "
             "vinyl editor untouched until this dialog closes.\n\n"
-            "After injection completes: open the color picker on any shape and press "
-            "Enter to commit. This triggers FH6 to re-upload all injected colors to "
-            "the GPU. Geometry (positions/scales/rotations) injects without this step."
+            "After injection completes: the lowest layer indices in your vinyl group "
+            "(typically layers 1–10) may contain placeholder geometry left over from "
+            "the original template and can occasionally render in front of the "
+            "injected artwork. If you notice unexpected shapes obscuring your design, "
+            "open the FH6 layer panel and delete, hide, or reposition the affected "
+            "low-index layers as needed."
         )
         warn_body.setWordWrap(True)
         wbf = QFont(); wbf.setPointSize(9)

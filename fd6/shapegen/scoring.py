@@ -90,6 +90,15 @@ def composite(
     return new, rms_error(new, target, alpha_mask)
 
 
+# In sticker mode, virtually every "solid" pixel of a candidate shape must sit
+# inside the opaque region. Anything less and the shape's body bleeds past the
+# alpha edge in FH6 (no per-pixel alpha there → solid blob in transparent space).
+# Counted against pixels where mask_local >= 128 (i.e., the shape's actual body,
+# excluding anti-aliased fringe) so AA at the silhouette doesn't disqualify
+# otherwise-clean shapes.
+STICKER_OVERLAP_MIN = 0.995
+
+
 def score_shape(
     shape: Shape,
     current: np.ndarray,
@@ -98,21 +107,36 @@ def score_shape(
 ) -> tuple[float, tuple[int, int, int, int]]:
     """Score a candidate without modifying the working canvas. Returns (rms_if_committed, optimal_color).
 
-    When `alpha_mask` is given, pixels with alpha == 0 are treated as 'don't care' — they
-    contribute zero error and shapes overlapping only transparent areas score as +inf (so they
-    won't be committed).
+    Sticker-mode contract: a shape must sit ESSENTIALLY ENTIRELY inside the
+    opaque region or it gets rejected with +inf. FH6 paints the full ellipse
+    with no per-pixel alpha, so any shape that bleeds past the silhouette
+    will render its body in what should be transparent space — exactly the
+    'black outline artifacts' the user reported.
     """
     h, w = current.shape[:2]
     mask_local, bbox = shape.rasterize_mask(w, h)
     x0, y0, x1, y1 = bbox
     if x1 <= x0 or y1 <= y0 or mask_local.size == 0:
         return float("inf"), shape.color
+    effective_mask = mask_local
     if alpha_mask is not None:
-        # Skip shapes entirely in transparent areas — they should never be committed
         region_alpha = alpha_mask[y0:y1, x0:x1]
-        if (region_alpha > 0).sum() == 0:
+        # Count only "solid" body pixels (alpha >=128) — ignores AA fringe so
+        # antialiased silhouette edges don't artificially disqualify shapes.
+        shape_body = mask_local >= 128
+        body_total = float(shape_body.sum())
+        if body_total < 1.0:
             return float("inf"), shape.color
-    color = compute_optimal_color(target, current, mask_local, bbox, shape.color[3])
+        opaque_body = region_alpha >= 128
+        if not opaque_body.any():
+            return float("inf"), shape.color
+        inside = float((shape_body & opaque_body).sum())
+        if inside / body_total < STICKER_OVERLAP_MIN:
+            return float("inf"), shape.color
+        # AND-mask for color so the zeroed-out RGB of transparent pixels in
+        # `target` can't drag the optimal color toward black.
+        effective_mask = np.minimum(mask_local, region_alpha)
+    color = compute_optimal_color(target, current, effective_mask, bbox, shape.color[3])
     a = color[3] / 255.0
     region_cur = current[y0:y1, x0:x1].astype(np.float32)
     region_tgt = target[y0:y1, x0:x1].astype(np.float32)

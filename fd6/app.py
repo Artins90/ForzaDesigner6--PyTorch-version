@@ -10,6 +10,11 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Forza Designer 6")
     app.setOrganizationName("FD6")
+    # Load bundled TTFs and apply the user's saved font choice (or the
+    # "Default" pseudo-family = Segoe UI Variable → Segoe UI → sans fallback).
+    from fd6.gui.fonts import load_bundled_fonts, apply_font, saved_font_name
+    load_bundled_fonts()
+    apply_font(app, saved_font_name())
     # Window icon matches the current theme's badge (Default → Pink)
     from fd6.gui.brand_banner import badge_path
     from fd6.gui.themes import badge_filename_for_theme, saved_theme_name

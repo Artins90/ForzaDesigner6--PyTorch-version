@@ -19,6 +19,8 @@ pyinstaller ^
     --add-data "Song3OpenSource.mp3;." ^
     --add-data "tools\fd6_128.png;tools" ^
     --add-data "AppIconTransparent.png;." ^
+    --add-data "BlossomParticle.png;." ^
+    --add-data "fonts;fonts" ^
     --add-data "Pink.png;." ^
     --add-data "Yellow.png;." ^
     --add-data "Purple.png;." ^
@@ -26,6 +28,17 @@ pyinstaller ^
     --add-data "Blue.png;." ^
     --add-data "Orange.png;." ^
     --hidden-import fd6.gui.music ^
+    --hidden-import fd6.gui.particles ^
+    --hidden-import fd6.gui.fonts ^
+    --hidden-import fd6.gui.image_search ^
+    --hidden-import PySide6.QtWebEngineCore ^
+    --hidden-import PySide6.QtWebEngineWidgets ^
+    --hidden-import PySide6.QtWebChannel ^
+    --hidden-import PySide6.QtWebEngineQuick ^
+    --hidden-import PySide6.QtPrintSupport ^
+    --collect-submodules PySide6.QtWebEngineCore ^
+    --collect-data PySide6 ^
+    --collect-binaries PySide6 ^
     --hidden-import fd6.inject.cli ^
     --hidden-import fd6.inject.discovery ^
     --hidden-import fd6.inject.patterns_io ^

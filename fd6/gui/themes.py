@@ -36,6 +36,15 @@ class ThemePalette(TypedDict):
     success: str
     warning: str
     error: str
+    # NEW (v0.2.0): bright theme-tinted background for the queue / recent / drop-zone
+    # panels so they pop instead of being near-black. Should be brighter than `surface`,
+    # darker than `accent`, in the same hue family.
+    panel_glow: str
+    # NEW (v0.2.0): three theme-related particle colors (light, mid, deep) used by the
+    # particle overlay. Should all be readable against `bg`.
+    particle_1: str
+    particle_2: str
+    particle_3: str
 
 
 # ─── Theme palettes ─────────────────────────────────────────────────────────
@@ -52,6 +61,10 @@ DEFAULT: ThemePalette = {
     "success":     "#2ecc71",
     "warning":     "#f1c40f",
     "error":       "#ff4d4d",
+    "panel_glow":  "#1f3960",   # deep but readable blue tint
+    "particle_1":  "#a8d0ff",
+    "particle_2":  "#5295e0",
+    "particle_3":  "#1e4e90",
 }
 
 JAPANESE_BLOSSOMS: ThemePalette = {
@@ -66,6 +79,10 @@ JAPANESE_BLOSSOMS: ThemePalette = {
     "success":     "#7be3a0",
     "warning":     "#ffc35a",
     "error":       "#ff5577",
+    "panel_glow":  "#4a1c30",   # bright cherry panel
+    "particle_1":  "#ffb8d0",
+    "particle_2":  "#ff86ad",
+    "particle_3":  "#c03070",
 }
 
 LILAC: ThemePalette = {
@@ -80,6 +97,10 @@ LILAC: ThemePalette = {
     "success":     "#7be3a0",
     "warning":     "#ffc35a",
     "error":       "#ff6688",
+    "panel_glow":  "#2e2360",   # deep indigo glow
+    "particle_1":  "#d0b0ff",   # lilac
+    "particle_2":  "#9568e0",   # purple
+    "particle_3":  "#4b3796",   # indigo
 }
 
 MINT_FOREST: ThemePalette = {
@@ -94,6 +115,10 @@ MINT_FOREST: ThemePalette = {
     "success":     "#7be3a0",
     "warning":     "#ffc35a",
     "error":       "#ff6677",
+    "panel_glow":  "#194a2d",   # bright forest green panel
+    "particle_1":  "#a8f0c8",
+    "particle_2":  "#3fe07a",
+    "particle_3":  "#188a40",
 }
 
 SKY_AZURE: ThemePalette = {
@@ -108,6 +133,10 @@ SKY_AZURE: ThemePalette = {
     "success":     "#7bdcb8",
     "warning":     "#ffd45a",
     "error":       "#ff6688",
+    "panel_glow":  "#1a4a78",   # bay-blue panel
+    "particle_1":  "#b8e0ff",   # powder blue
+    "particle_2":  "#00b4ff",   # azure
+    "particle_3":  "#1a608c",   # deep marine
 }
 
 PASTEL_YELLOW: ThemePalette = {
@@ -122,6 +151,10 @@ PASTEL_YELLOW: ThemePalette = {
     "success":     "#8fe0a0",
     "warning":     "#daa520",   # goldenrod
     "error":       "#ff7766",
+    "panel_glow":  "#5a4a1f",   # warm bright amber panel
+    "particle_1":  "#fff080",   # lemon
+    "particle_2":  "#ffd84a",   # sunset yellow
+    "particle_3":  "#b07a00",   # deep amber
 }
 
 PASTEL_RED: ThemePalette = {
@@ -136,6 +169,10 @@ PASTEL_RED: ThemePalette = {
     "success":     "#7be3a0",
     "warning":     "#ffc35a",
     "error":       "#800000",   # maroon
+    "panel_glow":  "#5a1c24",   # bright cherry-red panel
+    "particle_1":  "#ffaab0",   # pastel red
+    "particle_2":  "#ff5a6e",   # bright red
+    "particle_3":  "#a50d2a",   # crimson deep
 }
 
 
@@ -154,7 +191,7 @@ THEMES: dict[str, ThemePalette] = {
 # relative to the bundle root (or repo root when running from source).
 THEME_BADGES: dict[str, str] = {
     "Default":           "Pink.png",
-    "Japanese Blossoms": "Yellow.png",
+    "Japanese Blossoms": "Pink.png",          # cherry blossoms = pink, not yellow
     "Purple Passion":    "Purple.png",
     "Matrix Racing":     "Green.png",
     "Odaiba Bay":        "Blue.png",
@@ -236,6 +273,24 @@ def _build_qss(p: ThemePalette) -> str:
         background: {p["accent"]}; color: {p["bg"]};
     }}
     QListWidget::item:hover {{ background: {p["surface"]}; }}
+
+    /* === Theme-glow panels (queue, recent, drop zone) — bright theme tint ===
+       Widgets opt in by setting objectName == "ThemeGlow". */
+    QListWidget#ThemeGlow {{
+        background: {p["panel_glow"]};
+        border: 1px solid {p["accent"]};
+        color: {p["text"]};
+    }}
+    QListWidget#ThemeGlow::item:selected {{
+        background: {p["accent_hi"]}; color: {p["bg"]};
+    }}
+    QListWidget#ThemeGlow::item:hover {{ background: {p["accent"]}; color: {p["bg"]}; }}
+    QFrame#ThemeGlow, QWidget#ThemeGlow {{
+        background: {p["panel_glow"]};
+        border: 1px dashed {p["accent"]};
+        border-radius: 6px;
+        color: {p["text"]};
+    }}
 
     /* === Group boxes === */
     QGroupBox {{

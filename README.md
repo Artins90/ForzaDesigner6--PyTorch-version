@@ -49,7 +49,7 @@ To run this branch, ensure the following dependencies are installed:
 Use the pip command generator available on the following page, CUDA must be selected under compute platform: https://pytorch.org/get-started/locally/
 
 # 2. Install the remaining dependencies from PyPI
-pip install opencv-python numpy Pillow PySide6
+**pip install opencv-python numpy Pillow PySide6**
 
 * **`opencv-python` (`cv2`)** (For contrast enhancement, morphological operations, and contour hierarchy parsing)
 * **`numpy`**

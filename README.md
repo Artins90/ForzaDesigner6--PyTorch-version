@@ -73,5 +73,5 @@ OR
 
 **The authors and contributors of Forza Designer 6 and of the PyTorch-version branch don't accept any responsibility or liability whatsoever for any consequences arising from the use of this software. By downloading, building, installing, or running FD6 you acknowledge these risks and accept them in full. This tool is provided as-is, with no warranties of any kind. Not affiliated with, endorsed by, or sponsored by Turn 10 Studios, Playground Games, Microsoft, Xbox, or any official Forza brand.**
 
-**No support is provided for PyTorch-tensor-version whatsoever, please refrain from opening any issues.
+**No support is provided for PyTorch-version whatsoever, please refrain from opening any issues.
 Don't direct any issues arising from this branch to the original Forza Designer 6 repository**

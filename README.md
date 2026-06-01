@@ -1,9 +1,6 @@
 # Forza Designer 6 - PyTorch-version (Nvidia only)
 
 Based on Forza Designer 6: https://github.com/tokyubevoxelverse/ForzaDesigner6
-
-# Forza Designer 6 — PyTorch CUDA Acceleration Branch
-
 Forza Designer 6 (FD6) is an image-to-vector utility designed to reconstruct raster images into layered, stylized vector shapes compatible with Forza Horizon's vinyl group system.
 
 This branch replaces the CPU/PyOpenCL engine with a **strictly CUDA-accelerated PyTorch engine** paired with an **attention-guided search heuristic**. 
@@ -59,7 +56,9 @@ pip install opencv-python numpy Pillow PySide6
 * **`Pillow` (`PIL`)**
 * **`PySide6`** (For GUI, multi-threading, and event-loop signals)
 
----
+**How to run:**
+Open CMD in the parent directory where the fd6 folder is and run: **python -m fd6**
+---**
 
 ## Hardware Compatibility & Requirements
 

@@ -1,1 +1,46 @@
-
+{
+  "_schema_version": 2,
+  "_note": "FH6 LiveryGroup + layer_table memory layout. CONFIRMED working 2026-05-17 (writes propagate to render with no commit step). Strategy: scan writable private heap for u16 == expected layer_count at LiveryGroup+0x5A, validate by reading layer_table at LiveryGroup+0x78 and scoring sampled layers. Each layer is independently heap-allocated; layer_table is an array of u64 pointers (8-byte stride).",
+  "game_executable": "forzahorizon6.exe",
+  "discovered_at": "2026-05-17T00:00:00Z",
+  "anchor": {
+    "kind": "livery_group_scan",
+    "_comment": "No vtable RVA needed. Discovery is fully dynamic via u16 count scan + layer_table validation. Works across FH6 patches as long as the LiveryGroup struct layout (count@0x5A, table@0x78) is stable.",
+    "module": "forzahorizon6.exe"
+  },
+  "livery_group": {
+    "_comment": "LiveryGroup struct offsets. Discovered via live RE; confirmed by injecting all 500 layers of a 500-sphere template successfully.",
+    "layer_count_offset": 90,
+    "layer_count_offset_hex": "0x5A",
+    "layer_count_type": "u16",
+    "layer_table_offset": 120,
+    "layer_table_offset_hex": "0x78",
+    "layer_table_type": "u64",
+    "_layer_table_note": "Pointer to an array of u64 layer pointers (8-byte stride). array length == layer_count."
+  },
+  "layer_struct": {
+    "_comment": "Per-layer struct offsets. Each layer is independently heap-allocated; the layer_table holds pointers to these structs.",
+    "fields": [
+      {"name": "x",          "offset": 24, "offset_hex": "0x18", "type": "f32"},
+      {"name": "y",          "offset": 28, "offset_hex": "0x1C", "type": "f32", "note": "Write as -y (Y is negated from FD6's image-coords)"},
+      {"name": "scale_x",    "offset": 40, "offset_hex": "0x28", "type": "f32", "note": "Divide rx by 63.0 for ellipses, 127.0 for other shapes"},
+      {"name": "scale_y",    "offset": 44, "offset_hex": "0x2C", "type": "f32"},
+      {"name": "rotation",   "offset": 80, "offset_hex": "0x50", "type": "f32", "note": "Write as (360.0 - angle) % 360.0"},
+      {"name": "color_rgba", "offset": 116, "offset_hex": "0x74", "type": "u8x4", "note": "R, G, B, alpha. Alpha MUST be 255."},
+      {"name": "mask",       "offset": 120, "offset_hex": "0x78", "type": "u8",  "note": "0 = no mask, 1 = masked. Default 0."},
+      {"name": "shape_id",   "offset": 122, "offset_hex": "0x7A", "type": "u8",  "note": "102 = ellipse/circle, 101 = other shape types"}
+    ]
+  },
+  "scan_strategy": {
+    "_comment": "Scan writable private heap (exclude images for speed). For each u16 match at offset O, treat (region_addr + O - 0x5A) as candidate LiveryGroup; read layer_table at +0x78; sample 16 layer pointers and require >= 8 to pass _score_layer (each scoring >= 3 of 5 fields plausible). Best candidate wins.",
+    "include_writable_private_only": true,
+    "exclude_images": true,
+    "sample_layers_for_validation": 16,
+    "min_passing_layers": 8,
+    "min_score_per_layer": 3
+  },
+  "post_write": {
+    "commit_required": false,
+    "_note": "Writes propagate to render instantly. Distinct from the old POSITION-signature color-storage approach which required a UI commit (color picker Enter)."
+  }
+}

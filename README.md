@@ -3,7 +3,7 @@
 Based on Forza Designer 6: https://github.com/tokyubevoxelverse/ForzaDesigner6   
 Forza Designer 6 (FD6) is an image-to-vector utility designed to reconstruct raster images into layered, stylized vector shapes compatible with Forza Horizon's vinyl group system.
 
-This branch replaces the CPU/PyOpenCL engine with a **strictly CUDA-accelerated PyTorch engine** paired with an **attention-guided search heuristic**. 
+This fork replaces the CPU/PyOpenCL engine with a **strictly CUDA-accelerated PyTorch engine** paired with an **attention-guided search heuristic**. 
 By executing shape rasterization, canvas blending, and mathematical scoring entirely on GPU tensors, the engine minimizes system RAM to GPU VRAM transfer overhead.
 
 ---
@@ -28,9 +28,9 @@ By executing shape rasterization, canvas blending, and mathematical scoring enti
 
 ---
 
-## Architectural Comparison
+## Architectural Comparison (at the time of writing)
 
-| Architectural Dimension | Original Developer's Version | This PyTorch Branch |
+| Architectural Dimension | Original Version | This PyTorch Fork |
 | :--- | :--- | :--- |
 | **Backend Framework** | PyOpenCL (OpenCL C Kernel strings executed on host-allocated GPU buffers) | **PyTorch (CUDA-native)** using GPU tensors and optimized PyTorch mathematical operators |
 | **Hardware Compatibility** | Cross-vendor (NVIDIA, AMD, Intel GPU support through graphics drivers) | **NVIDIA-specific** (requires CUDA runtime support) |
@@ -43,7 +43,7 @@ By executing shape rasterization, canvas blending, and mathematical scoring enti
 
 ## Technical Dependencies
 
-To run this branch, ensure the following dependencies are installed:
+To run this fork, ensure the following dependencies are installed:
 
 # 1. Install torch (PyTorch) 
 Use the pip command generator available on the following page, CUDA must be selected under compute platform: https://pytorch.org/get-started/locally/
@@ -71,7 +71,7 @@ OR
 **Disclaimer**
 **Use entirely at your own risk. FD6 modifies the memory of a running Forza Horizon process to populate vinyl-group shapes. It does not patch the game executable, install drivers, modify save files, or attempt to bypass any anti-cheat or DRM system. However, memory modification of a live game process may be interpreted by Microsoft, Xbox Live, or the game's publisher (Turn 10 / Playground Games) as a violation of the Microsoft Services Agreement, the Xbox Community Standards, or the relevant Forza title's terms of use. Doing so may result in temporary suspension or permanent ban of your Xbox / Microsoft account, loss of access to purchased games, online services, achievements, and any content created with FD6.**
 
-**The authors and contributors of Forza Designer 6 and of the PyTorch-version branch don't accept any responsibility or liability whatsoever for any consequences arising from the use of this software. By downloading, building, installing, or running FD6 you acknowledge these risks and accept them in full. This tool is provided as-is, with no warranties of any kind. Not affiliated with, endorsed by, or sponsored by Turn 10 Studios, Playground Games, Microsoft, Xbox, or any official Forza brand.**
+**The authors and contributors of Forza Designer 6 and of the PyTorch-version fork don't accept any responsibility or liability whatsoever for any consequences arising from the use of this software. By downloading, building, installing, or running FD6 you acknowledge these risks and accept them in full. This tool is provided as-is, with no warranties of any kind. Not affiliated with, endorsed by, or sponsored by Turn 10 Studios, Playground Games, Microsoft, Xbox, or any official Forza brand.**
 
 **No support is provided for PyTorch-version whatsoever, please refrain from opening any issues.
-Don't direct any issues arising from this branch to the original Forza Designer 6 repository**
+Don't direct any issues arising from this fork to the original Forza Designer 6 repository**

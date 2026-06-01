@@ -1,6 +1,6 @@
 # Forza Designer 6 - PyTorch-version (Nvidia only)
 
-Based on Forza Designer 6: https://github.com/tokyubevoxelverse/ForzaDesigner6
+Based on Forza Designer 6: https://github.com/tokyubevoxelverse/ForzaDesigner6   
 Forza Designer 6 (FD6) is an image-to-vector utility designed to reconstruct raster images into layered, stylized vector shapes compatible with Forza Horizon's vinyl group system.
 
 This branch replaces the CPU/PyOpenCL engine with a **strictly CUDA-accelerated PyTorch engine** paired with an **attention-guided search heuristic**. 

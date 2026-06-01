@@ -23,7 +23,7 @@ By executing shape rasterization, canvas blending, and mathematical scoring enti
 * **Auto-Orientation:** Automatically rotates and scales candidate shapes to align directly with the local edge orientation and complexity of the target image coordinates.
 
 ### 4. Post-Generation Relaxation ("Wiggle & Prune")
-* **Sequential Optimization:** Features an on-demand forward relaxation sweep that optimizes committed shapes on completed vinyl json files. 
+* **Sequential Optimization:** Features an on-demand forward relaxation sweep that optimizes committed shapes in completed vinyl json files. 
 * **Layer Caching:** Implements Canvas and Occlusion caches to track layer visibility, allowing the engine to safely wiggle shape parameters to minimize error and prune redundant shapes.
 
 ---

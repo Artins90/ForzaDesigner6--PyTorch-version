@@ -57,7 +57,8 @@ pip install opencv-python numpy Pillow PySide6
 * **`PySide6`** (For GUI, multi-threading, and event-loop signals)
 
 **How to run:**
-Open CMD in the parent directory where the fd6 folder is and run: **python -m fd6** 
+- Use the provided **run.bat**
+Open CMD in the parent directory where the fd6 folder is (or use cd to navigate to the parent folder of fd6) and run: **python -m fd6** 
 
 ---
 

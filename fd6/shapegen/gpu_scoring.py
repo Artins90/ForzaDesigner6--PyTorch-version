@@ -1,270 +1,124 @@
 from __future__ import annotations
+import torch
 import math
 from typing import Tuple
-import torch
 from fd6.shapegen.shapes import Shape
 
-_cached_grids = {}
-
-# Dynamic global caches to prevent CPU-GPU syncs on allocation
-_INF_TENSOR: torch.Tensor | None = None
-_FALSE_TENSOR: torch.Tensor | None = None
-
-def get_true_area_gpu(shape: Shape) -> float:
-    tname = shape.type_name
-    if tname == "circle": return math.pi * (max(getattr(shape, 'r', 1e-6), 1e-6)**2)
-    elif tname in ("ellipse", "rotated_ellipse"): return math.pi * max(getattr(shape, 'rx', 1e-6), 1e-6) * max(getattr(shape, 'ry', 1e-6), 1e-6)
-    elif tname in ("rectangle", "rotated_rectangle"): return 4.0 * max(getattr(shape, 'rx', 1e-6), 1e-6) * max(getattr(shape, 'ry', 1e-6), 1e-6)
-    elif tname == "triangle": return 2.0 * max(getattr(shape, 'rx', 1e-6), 1e-6) * max(getattr(shape, 'ry', 1e-6), 1e-6)
-    return 0.0
-
-def _get_meshgrid_gpu(w: int, h: int, device: torch.device):
-    key = (w, h, device)
-    if key not in _cached_grids:
-        ys = torch.arange(h, dtype=torch.float32, device=device)
-        xs = torch.arange(w, dtype=torch.float32, device=device)
-        xg, yg = torch.meshgrid(xs, ys, indexing='xy')
-        _cached_grids[key] = (xg, yg)
-    return _cached_grids[key]
+def is_shape_out_of_bounds(shape: Shape, w: int, h: int) -> bool:
+    """Enforce strict sub-pixel boundary safety (0.1px tolerance)."""
+    if hasattr(shape, 'rx') and hasattr(shape, 'ry'):
+        a, b = shape.rx, shape.ry
+        if hasattr(shape, 'angle'):
+            rad = math.radians(shape.angle)
+            cos_t, sin_t = math.cos(rad), math.sin(rad)
+            x_ext = math.sqrt(a**2 * cos_t**2 + b**2 * sin_t**2)
+            y_ext = math.sqrt(a**2 * sin_t**2 + b**2 * cos_t**2)
+        else: x_ext, y_ext = a, b
+        if (shape.x - x_ext < -0.1 or shape.x + x_ext > w + 0.1 or 
+            shape.y - y_ext < -0.1 or shape.y + y_ext > h + 0.1): return True
+    elif hasattr(shape, 'r'):
+        r = shape.r
+        if (shape.x - r < -0.1 or shape.x + r > w + 0.1 or 
+            shape.y - r < -0.1 or shape.y + r > h + 0.1): return True
+    return False
 
 def _rasterize_mask_gpu(shape: Shape, w: int, h: int) -> Tuple[torch.Tensor, Tuple[int, int, int, int]]:
     bbox = shape.bbox(w, h)
     x0, y0, x1, y1 = bbox
-    if x1 <= x0 or y1 <= y0: 
-        return torch.zeros((0, 0), dtype=torch.bool, device='cuda'), bbox
-    tname = shape.type_name
-    xg_full, yg_full = _get_meshgrid_gpu(w, h, torch.device('cuda'))
-    xg = xg_full[y0:y1, x0:x1]
-    yg = yg_full[y0:y1, x0:x1]
-
-    xg = xg - getattr(shape, 'x', 0.0)
-    yg = yg - getattr(shape, 'y', 0.0)
-
-    # Sharp boundaries preserve sharp details in high-frequency regions
-    if tname == "rotated_ellipse":
-        rad = math.radians(getattr(shape, 'angle', 0.0))
+    if x1 <= x0 or y1 <= y0: return torch.zeros((0, 0), device='cuda'), bbox
+    ys = torch.arange(y0, y1, device='cuda') - shape.y
+    xs = torch.arange(x0, x1, device='cuda') - shape.x
+    yg, xg = ys.unsqueeze(1), xs.unsqueeze(0)
+    if hasattr(shape, 'angle'):
+        rad = math.radians(shape.angle)
         cos_a, sin_a = math.cos(rad), math.sin(rad)
-        xr = cos_a * xg + sin_a * yg
-        yr = -sin_a * xg + cos_a * yg
-        dx = xr / max(getattr(shape, 'rx', 1.0), 1e-6)
-        dy = yr / max(getattr(shape, 'ry', 1.0), 1e-6)
-        mask = (dx ** 2 + dy ** 2) <= 1.0
-    elif tname == "ellipse":
-        dx = xg / max(getattr(shape, 'rx', 1.0), 1e-6)
-        dy = yg / max(getattr(shape, 'ry', 1.0), 1e-6)
-        mask = (dx ** 2 + dy ** 2) <= 1.0
-    elif tname == "circle":
-        r2 = max(getattr(shape, 'r', 1.0), 1e-6) ** 2
-        mask = (xg ** 2 + yg ** 2) <= r2
+        xr, yr = cos_a * xg + sin_a * yg, -sin_a * xg + cos_a * yg
+        dx, dy = xr / max(getattr(shape, 'rx', 1.0), 1e-6), yr / max(getattr(shape, 'ry', 1.0), 1e-6)
     else:
-        raise ValueError(f"Unsupported shape type for GPU rasterization: {tname}")
-        
-    return mask, bbox
+        rx = getattr(shape, 'rx', getattr(shape, 'r', 1.0))
+        ry = getattr(shape, 'ry', getattr(shape, 'r', 1.0))
+        dx, dy = xg / max(rx, 1e-6), yg / max(ry, 1e-6)
+    mask = (dx ** 2 + dy ** 2) <= 1.0
+    return (mask.to(torch.uint8) * 255), bbox
 
-def _compute_optimal_color_gpu_tensor(
-    region_tgt: torch.Tensor,
-    region_cur: torch.Tensor,
-    mask_local: torch.Tensor,
-    alpha: int,
-) -> torch.Tensor:
-    if mask_local.numel() == 0: 
-        return torch.zeros(3, dtype=torch.float32, device=region_tgt.device)
-    
-    m = mask_local.float()
-    weight = m.sum()
-    
-    a = alpha / 255.0
-    if weight < 0.5 or a < 1e-6:
-        return torch.zeros(3, dtype=torch.float32, device=region_tgt.device)
-        
-    src = (region_tgt - (1.0 - a) * region_cur) / a
-    src_masked = src * m.unsqueeze(-1)
-    avg = src_masked.reshape(-1, 3).sum(dim=0) / weight
-    return torch.clamp(avg, 0, 255)
-
-def score_shape_gpu_tensor(
-    shape: Shape,
-    current: torch.Tensor,
-    target: torch.Tensor,
-    alpha_mask: torch.Tensor | None = None,
-    current_diff_sq: float = None,
-    n_px: float = None,
-    sticker_overlap_min: float = 0.995,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    global _INF_TENSOR, _FALSE_TENSOR
-    if _INF_TENSOR is None:
-        _INF_TENSOR = torch.tensor(float('inf'), device=current.device)
-    if _FALSE_TENSOR is None:
-        _FALSE_TENSOR = torch.tensor(False, device=current.device)
-
-    h, w = current.shape[:2]
-    mask_local, bbox = _rasterize_mask_gpu(shape, w, h)
-    x0, y0, x1, y1 = bbox
-    
-    if x1 <= x0 or y1 <= y0: 
-        shape_color = getattr(shape, 'color', (0, 0, 0, 128))
-        color_fallback = torch.tensor([*shape_color[:3], shape_color[3]], dtype=torch.float32, device=current.device)
-        return _INF_TENSOR, color_fallback
-        
-    region_cur = current[y0:y1, x0:x1].float()
-    region_tgt = target[y0:y1, x0:x1].float()
-    
-    true_area = get_true_area_gpu(shape)
-    shape_body = mask_local
-    effective_mask = mask_local
-    canvas_area_t = shape_body.sum().float()
+def compute_diff_sq_sum_gpu(canvas: torch.Tensor, target: torch.Tensor, alpha_mask: torch.Tensor | None) -> Tuple[float, float]:
+    c_pm, c_a = canvas[..., :3].float(), canvas[..., 3].float()
+    t_pm = target.float()
     
     if alpha_mask is not None:
-        region_alpha = alpha_mask[y0:y1, x0:x1]
-        opaque_body = region_alpha >= 128
-        inside = (shape_body & opaque_body).sum().float()
-        # Normalizes strictly against actual discrete rasterized area, bypassing grid pixel discretization errors
-        invalid_mask = (~opaque_body.any()) | ((inside / torch.clamp(canvas_area_t, min=1.0)) < sticker_overlap_min)
-        effective_mask = mask_local & opaque_body
+        t_a = alpha_mask.float()
+        # Clean any fuzzy anti-aliased pixels to exactly 0 to match scoring constraints
+        t_a = torch.where(t_a < 15.0, 0.0, t_a)
     else:
-        invalid_mask = _FALSE_TENSOR
-
-    color_rgb = _compute_optimal_color_gpu_tensor(region_tgt, region_cur, effective_mask, shape.color[3])
-    
-    a = shape.color[3] / 255.0
-    m = mask_local.float().unsqueeze(-1)
-    blended = region_cur + m * (a * (color_rgb - region_cur))
-    
-    diff_in = blended - region_tgt
-    diff_old = region_cur - region_tgt
-    delta_sq = (diff_in ** 2) - (diff_old ** 2)
-    
-    bleed_pixels_t = torch.clamp(true_area - canvas_area_t - (true_area * 0.05), min=0.0)
-    bleed_penalty = bleed_pixels_t * (255.0 ** 2)
-
-    if alpha_mask is None:
-        region_delta_sq = delta_sq.sum()
-        total_sq = current_diff_sq + region_delta_sq + bleed_penalty
-        rms = torch.sqrt(torch.clamp(total_sq, min=0.0) / n_px)
-    else:
-        weight_region = (alpha_mask[y0:y1, x0:x1] > 0).float().unsqueeze(-1)
-        region_delta_sq = (delta_sq * weight_region).sum()
-        total_sq = current_diff_sq + region_delta_sq + bleed_penalty
+        t_a = torch.full_like(c_a, 255.0)
         
-        if n_px < 1.0:
-            rms = torch.zeros(1, dtype=torch.float32, device=current.device)
-        else:
-            rms = torch.sqrt(torch.clamp(total_sq, min=0.0) / n_px)
-            
-    color_t = torch.cat([color_rgb, torch.tensor([shape.color[3]], dtype=torch.float32, device=current.device)])
-    rms = torch.where(invalid_mask, _INF_TENSOR, rms)
-    return rms, color_t
+    diff_rgb_sq, diff_a_sq = (c_pm - t_pm)**2, (c_a - t_a)**2
+    return (torch.sum(diff_rgb_sq) + torch.sum(diff_a_sq)).item(), float(canvas.shape[0] * canvas.shape[1])
 
-def compute_diff_sq_sum_gpu(
-    current: torch.Tensor, target: torch.Tensor, alpha_mask: torch.Tensor | None = None
-) -> Tuple[float, float]:
-    diff = current.float() - target.float()
-    sq = diff * diff
-    if alpha_mask is None:
-        return sq.sum().item(), float(current.numel())
-    weight = (alpha_mask > 0).float().unsqueeze(-1)
-    return (sq * weight).sum().item(), float(weight.sum().item() * 3)
+def _rms_error_gpu(canvas: torch.Tensor, target: torch.Tensor, alpha_mask: torch.Tensor | None) -> float:
+    diff_sq, n_px = compute_diff_sq_sum_gpu(canvas, target, alpha_mask)
+    return math.sqrt(max(0.0, diff_sq) / max(n_px * 4.0, 1e-6))
 
-def score_shape_gpu_batch(
-    shapes: list[Shape],
-    current: torch.Tensor,
-    target: torch.Tensor,
-    alpha_mask: torch.Tensor | None = None,
-    current_diff_sq: float = None,
-    n_px: float = None,
-) -> Tuple[list[float], list[Tuple[int, int, int, int]]]:
-    global _INF_TENSOR, _FALSE_TENSOR
-    if _INF_TENSOR is None:
-        _INF_TENSOR = torch.tensor(float('inf'), device=current.device)
-    if _FALSE_TENSOR is None:
-        _FALSE_TENSOR = torch.tensor(False, device=current.device)
-        
-    scores_tensors = []
-    colors_tensors = []
-    if current_diff_sq is None or n_px is None:
-        c_sq, c_n = compute_diff_sq_sum_gpu(current, target, alpha_mask)
-        current_diff_sq = current_diff_sq if current_diff_sq is not None else c_sq
-        n_px = n_px if n_px is not None else c_n
-        
-    for shape in shapes:
-        rms_t, color_t = score_shape_gpu_tensor(shape, current, target, alpha_mask, current_diff_sq, n_px)
-        scores_tensors.append(rms_t)
-        colors_tensors.append(color_t)
-        
-    scores_stacked = torch.stack(scores_tensors)
-    colors_stacked = torch.stack(colors_tensors)
-    scores_list = scores_stacked.cpu().tolist()
-    colors_list = colors_stacked.cpu().tolist()
-    colors_out = [(int(c[0]), int(c[1]), int(c[2]), int(c[3])) for c in colors_list]
-    return scores_list, colors_out
+def estimate_optimal_color_gpu(mask_local: torch.Tensor, bbox: Tuple[int, int, int, int], canvas: torch.Tensor, target: torch.Tensor, shape_alpha: float) -> Tuple[int, int, int]:
+    x0, y0, x1, y1 = bbox
+    canvas_region, target_region = canvas[y0:y1, x0:x1, :3].float(), target[y0:y1, x0:x1, :3].float()
+    mask_f = (mask_local > 0).float().unsqueeze(-1)
+    sum_t_pm, sum_c_pm, n_pixels = torch.sum(target_region * mask_f, dim=(0, 1)), torch.sum(canvas_region * mask_f, dim=(0, 1)), torch.sum(mask_f, dim=(0, 1))
+    if n_pixels.item() == 0: return (128, 128, 128)
+    a_s = shape_alpha / 255.0
+    optimal_rgb = torch.clamp((sum_t_pm - (1.0 - a_s) * sum_c_pm) / max(a_s * n_pixels, 1e-6), 0.0, 255.0)
+    return (int(optimal_rgb[0].item()), int(optimal_rgb[1].item()), int(optimal_rgb[2].item()))
 
-def score_shape_gpu(
-    shape: Shape,
-    current: torch.Tensor,
-    target: torch.Tensor,
-    alpha_mask: torch.Tensor | None = None,
-    current_diff_sq: float = None,
-    n_px: float = None,
-) -> Tuple[float, Tuple[int, int, int, int]]:
-    global _INF_TENSOR, _FALSE_TENSOR
-    if _INF_TENSOR is None:
-        _INF_TENSOR = torch.tensor(float('inf'), device=current.device)
-    if _FALSE_TENSOR is None:
-        _FALSE_TENSOR = torch.tensor(False, device=current.device)
-
-    if current_diff_sq is None or n_px is None:
-        c_sq, c_n = compute_diff_sq_sum_gpu(current, target, alpha_mask)
-        current_diff_sq = current_diff_sq if current_diff_sq is not None else c_sq
-        n_px = n_px if n_px is not None else c_n
-    rms_t, color_t = score_shape_gpu_tensor(shape, current, target, alpha_mask, current_diff_sq, n_px)
-    return rms_t.item(), (int(color_t[0].item()), int(color_t[1].item()), int(color_t[2].item()), int(color_t[3].item()))
-
-def composite_gpu(
-    current: torch.Tensor,
-    shape: Shape,
-    target: torch.Tensor,
-    alpha_mask: torch.Tensor | None = None,
-    recalculate_color: bool = True,  # Cleanly prevents color-reoptimization drift during seeding
-) -> Tuple[torch.Tensor, float]:
-    h, w = current.shape[:2]
+def composite_gpu(canvas: torch.Tensor, shape: Shape, target: torch.Tensor, alpha_mask: torch.Tensor | None, recalculate_color: bool = True) -> Tuple[torch.Tensor, float]:
+    w, h = canvas.shape[1], canvas.shape[0]
     mask_local, bbox = _rasterize_mask_gpu(shape, w, h)
     x0, y0, x1, y1 = bbox
-    if x1 <= x0 or y1 <= y0 or mask_local.numel() == 0: 
-        return current, _rms_error_gpu(current, target, alpha_mask)
-        
-    if alpha_mask is not None:
-        region_alpha = alpha_mask[y0:y1, x0:x1].float() / 255.0
-        effective_mask = mask_local * region_alpha
-    else:
-        effective_mask = mask_local
-        
-    region_cur = current[y0:y1, x0:x1].float()
-    region_tgt = target[y0:y1, x0:x1].float()
-    
+    if mask_local.numel() == 0: return canvas.clone(), _rms_error_gpu(canvas, target, alpha_mask)
+    shape_alpha = float(shape.color[3]) if len(shape.color) >= 4 else 255.0
     if recalculate_color:
-        color_rgb = _compute_optimal_color_gpu_tensor(region_tgt, region_cur, effective_mask, shape.color[3])
-        color = (int(color_rgb[0].item()), int(color_rgb[1].item()), int(color_rgb[2].item()), shape.color[3])
-        shape.color = color
-    else:
-        color = shape.color
-        color_rgb = torch.tensor(color[:3], dtype=torch.float32, device=current.device)
-    
-    a = color[3] / 255.0
-    m = effective_mask.float().unsqueeze(-1)  # FORCED FLOAT CASTING PREVENTS SEED-STAGE CANVAS CORRUPTION
-    blended = region_cur + m * (a * (color_rgb - region_cur))
-    
-    new = current.clone()
-    new[y0:y1, x0:x1] = torch.clamp(blended, 0, 255).to(torch.uint8)
-    return new, _rms_error_gpu(new, target, alpha_mask)
+        rgb = estimate_optimal_color_gpu(mask_local, bbox, canvas, target, shape_alpha)
+        shape.color = (*rgb, int(shape_alpha))
+    else: rgb = shape.color[:3]
+    shape_rgb = torch.tensor(rgb, dtype=torch.float32, device='cuda')
+    canvas_new = canvas.clone()
+    canvas_region = canvas_new[y0:y1, x0:x1].float()
+    mask_f = (mask_local > 0).float().unsqueeze(-1)
+    a_src = (shape_alpha / 255.0) * mask_f
+    canvas_region[..., :3] = shape_rgb * a_src + canvas_region[..., :3] * (1.0 - a_src)
+    canvas_region[..., 3:4] = 255.0 * a_src + canvas_region[..., 3:4] * (1.0 - a_src)
+    canvas_new[y0:y1, x0:x1] = torch.clamp(canvas_region, 0.0, 255.0).to(torch.uint8)
+    return canvas_new, _rms_error_gpu(canvas_new, target, alpha_mask)
 
-def _rms_error_gpu(
-    a: torch.Tensor, b: torch.Tensor, alpha_mask: torch.Tensor | None = None
-) -> float:
-    diff = a.to(torch.int32) - b.to(torch.int32)
-    sq = diff * diff
-    if alpha_mask is None: return float(torch.sqrt(sq.float().mean()).item())
-    weight = (alpha_mask > 0).float().unsqueeze(-1)
-    total = float((sq.float() * weight).sum().item())
-    n = float(weight.sum().item() * 3)
-    if n < 1: return 0.0
-    return float(torch.sqrt(torch.tensor(total / n)).item())
+def score_shape_gpu(shape: Shape, canvas: torch.Tensor, target: torch.Tensor, alpha_mask: torch.Tensor | None, current_diff_sq: float, n_px: float) -> Tuple[float, Tuple[int, int, int, int]]:
+    w, h = canvas.shape[1], canvas.shape[0]
+    if is_shape_out_of_bounds(shape, w, h): return float('inf'), (128, 128, 128, 255)
+    mask_local, bbox = _rasterize_mask_gpu(shape, w, h)
+    x0, y0, x1, y1 = bbox
+    if mask_local.numel() == 0: return float('inf'), (128, 128, 128, 255)
+    
+    if alpha_mask is not None:
+        target_alpha_region = alpha_mask[y0:y1, x0:x1].float()
+        # Enforce zero-tolerance constraint on anti-aliased fringe pixels (alpha < 15)
+        # Any overlap, even by a faint shape, results in instant rejection
+        if ((mask_local > 0) & (target_alpha_region < 15.0)).any(): 
+            return float('inf'), (128, 128, 128, 255)
+        target_alpha_region = target_alpha_region.unsqueeze(-1)
+    else: 
+        target_alpha_region = torch.full((y1-y0, x1-x0, 1), 255.0, device='cuda')
+        
+    shape_alpha = float(shape.color[3]) if len(shape.color) >= 4 else 255.0
+    rgb = estimate_optimal_color_gpu(mask_local, bbox, canvas, target, shape_alpha)
+    shape_rgb = torch.tensor(rgb, dtype=torch.float32, device='cuda')
+    canvas_region, target_region = canvas[y0:y1, x0:x1].float(), target[y0:y1, x0:x1, :3].float()
+    old_local_diff_sq = torch.sum((canvas_region[..., :3]-target_region)**2) + torch.sum((canvas_region[..., 3:4]-target_alpha_region)**2)
+    mask_f = (mask_local > 0).float().unsqueeze(-1)
+    a_src = (shape_alpha / 255.0) * mask_f
+    new_local_diff_sq = torch.sum((shape_rgb * a_src + canvas_region[..., :3] * (1.0 - a_src) - target_region)**2) + torch.sum((255.0 * a_src + canvas_region[..., 3:4] * (1.0 - a_src) - target_alpha_region)**2)
+    return math.sqrt(max(0.0, current_diff_sq - old_local_diff_sq.item() + new_local_diff_sq.item()) / max(n_px * 4.0, 1e-6)), (*rgb, int(shape_alpha))
+
+def score_shape_gpu_batch(candidates, canvas, target, alpha_mask, current_diff_sq, n_px):
+    scores, colors = [], []
+    for s in candidates:
+        rms, color = score_shape_gpu(s, canvas, target, alpha_mask, current_diff_sq, n_px)
+        scores.append(rms); colors.append(color)
+    return scores, colors

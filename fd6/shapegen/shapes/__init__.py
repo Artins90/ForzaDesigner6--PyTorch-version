@@ -1,11 +1,16 @@
-from fd6.shapegen.shapes.base import Shape, ShapeType, SHAPE_REGISTRY, random_shape, shape_from_json
-from fd6.shapegen.shapes.ellipse import Ellipse, RotatedEllipse
-from fd6.shapegen.shapes.circle import Circle
-from fd6.shapegen.shapes.rectangle import Rectangle, RotatedRectangle
-from fd6.shapegen.shapes.triangle import Triangle
+# --- START OF FILE fd6/shapegen/shapes/__init__.py ---
+from __future__ import annotations
 
-__all__ = [
-    "Shape", "ShapeType", "SHAPE_REGISTRY", "random_shape", "shape_from_json",
-    "Ellipse", "RotatedEllipse", "Circle",
-    "Rectangle", "RotatedRectangle", "Triangle"
-]
+# Import base primitives to expose them to the rest of the application
+from .base import Shape, random_shape, shape_from_json, SHAPE_REGISTRY
+
+# Explicitly import all shape submodules to trigger their 
+# @registration decorators and populate SHAPE_REGISTRY at startup:
+from . import circle
+from . import ellipse
+from . import half_ellipse
+from . import rectangle
+from . import right_triangle
+from . import rounded_rectangle
+from . import triangle
+# --- END OF FILE ---

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Iterable, Tuple
 import random
 import time
+import math
 from pathlib import Path
 
 import numpy as np
@@ -131,6 +132,10 @@ class Engine:
         self.profile = config.profile
         self.h, self.w = target_rgb.shape[:2]
         
+        # Precompute resolution-adaptive size decay exponent
+        # Relaxes scale limitations on high resolutions to prevent pixel-level aliasing fragmentation
+        self.size_decay_exponent = max(1.1, min(1.5, 1.4 - 0.1 * math.log2(max(1.0, self.w / 1024.0))))
+        
         if alpha_mask is None:
             alpha_mask = np.full((self.h, self.w), 255, dtype=np.uint8)
 
@@ -226,13 +231,14 @@ class Engine:
             else:
                 scale_factor = self.rng.random() ** 2.0
                 max_r_flat = self.w / 4.0
-                max_r_detail = max(3.0, (self.w / 2.0) * (rms_ratio ** 1.5))
+                # Using the computed resolution-adaptive size decay exponent
+                max_r_detail = max(3.0, (self.w / 2.0) * (rms_ratio ** self.size_decay_exponent))
                 local_max_r = max_r_flat * (1.0 - local_priority) + max_r_detail * local_priority
                 shape.rx = float(1.0 + (local_max_r * scale_factor))
                 shape.ry = float(1.0 + (local_max_r * scale_factor))
                 
         elif hasattr(shape, 'r'):
-            global_max_r = max(2.5, (self.w / 2.0) * (rms_ratio ** 1.5))
+            global_max_r = max(2.5, (self.w / 2.0) * (rms_ratio ** self.size_decay_exponent))
             size_multiplier = 1.0 - (0.85 * local_priority)
             local_max_r = max(2.5, global_max_r * size_multiplier)
             
@@ -264,7 +270,7 @@ class Engine:
         no_improve = 0
         batch_size = min(iterations, 32)
         rms_ratio = max(0.01, min(1.0, self.rms / self.start_rms))
-        global_max_r = max(3.0, (self.w / 2.0) * (rms_ratio ** 1.5))
+        global_max_r = max(3.0, (self.w / 2.0) * (rms_ratio ** self.size_decay_exponent))
         
         cy = int(max(0, min(self.h - 1, best.y)))
         cx = int(max(0, min(self.w - 1, best.x)))
@@ -347,7 +353,7 @@ class Engine:
         no_improve = 0
         batch_size = min(iterations, 32)
         rms_ratio = max(0.01, min(1.0, best_rms / self.start_rms))
-        global_max_r = max(3.0, (self.w / 2.0) * (rms_ratio ** 1.5))
+        global_max_r = max(3.0, (self.w / 2.0) * (rms_ratio ** self.size_decay_exponent))
         
         cy = int(max(0, min(self.h - 1, best.y)))
         cx = int(max(0, min(self.w - 1, best.x)))

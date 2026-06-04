@@ -22,6 +22,34 @@ def is_shape_out_of_bounds(shape: Shape, w: int, h: int) -> bool:
             shape.y - r < -0.1 or shape.y + r > h + 0.1): return True
     return False
 
+def compensated_ellipse_size(w: float, h: float) -> tuple[float, float]:
+    major = max(w, h)
+    minor = max(1.0, min(w, h))
+    aspect = major / minor
+
+    uniform_scale = 1.0
+    if major >= 220:
+        uniform_scale *= 0.985
+    if major >= 300:
+        uniform_scale *= 0.975
+
+    major_axis_scale = 1.0
+    if aspect >= 2.0:
+        major_axis_scale *= 0.985
+    if aspect >= 3.5:
+        major_axis_scale *= 0.970
+    if aspect >= 6.0:
+        major_axis_scale *= 0.955
+
+    if w >= h:
+        sx = uniform_scale * major_axis_scale
+        sy = uniform_scale
+    else:
+        sx = uniform_scale
+        sy = uniform_scale * major_axis_scale
+
+    return max(1.0, w * sx), max(1.0, h * sy)
+
 def _rasterize_mask_gpu(shape: Shape, w: int, h: int) -> Tuple[torch.Tensor, Tuple[int, int, int, int]]:
     bbox = shape.bbox(w, h)
     x0, y0, x1, y1 = bbox
@@ -29,16 +57,61 @@ def _rasterize_mask_gpu(shape: Shape, w: int, h: int) -> Tuple[torch.Tensor, Tup
     ys = torch.arange(y0, y1, device='cuda') - shape.y
     xs = torch.arange(x0, x1, device='cuda') - shape.x
     yg, xg = ys.unsqueeze(1), xs.unsqueeze(0)
-    if hasattr(shape, 'angle'):
-        rad = math.radians(shape.angle)
-        cos_a, sin_a = math.cos(rad), math.sin(rad)
-        xr, yr = cos_a * xg + sin_a * yg, -sin_a * xg + cos_a * yg
-        dx, dy = xr / max(getattr(shape, 'rx', 1.0), 1e-6), yr / max(getattr(shape, 'ry', 1.0), 1e-6)
+    
+    tname = shape.type_name
+    
+    # 1. Triangle & RightTriangle Math
+    if "triangle" in tname:
+        verts = shape._get_vertices()
+        v1_x, v1_y = verts[0][0] - shape.x, verts[0][1] - shape.y
+        v2_x, v2_y = verts[1][0] - shape.x, verts[1][1] - shape.y
+        v3_x, v3_y = verts[2][0] - shape.x, verts[2][1] - shape.y
+        
+        d1 = (v2_x - v1_x) * (yg - v1_y) - (v2_y - v1_y) * (xg - v1_x)
+        d2 = (v3_x - v2_x) * (yg - v2_y) - (v3_y - v2_y) * (xg - v2_x)
+        d3 = (v1_x - v3_x) * (yg - v3_y) - (v1_y - v3_y) * (xg - v3_x)
+        
+        has_neg = (d1 < 0) | (d2 < 0) | (d3 < 0)
+        has_pos = (d1 > 0) | (d2 > 0) | (d3 > 0)
+        mask = ~(has_neg & has_pos)
     else:
-        rx = getattr(shape, 'rx', getattr(shape, 'r', 1.0))
-        ry = getattr(shape, 'ry', getattr(shape, 'r', 1.0))
-        dx, dy = xg / max(rx, 1e-6), yg / max(ry, 1e-6)
-    mask = (dx ** 2 + dy ** 2) <= 1.0
+        if hasattr(shape, 'angle'):
+            rad = math.radians(shape.angle)
+            cos_a, sin_a = math.cos(rad), math.sin(rad)
+            xr, yr = cos_a * xg + sin_a * yg, -sin_a * xg + cos_a * yg
+        else:
+            xr, yr = xg, yg
+            
+        # 2. Rectangle & RoundedRectangle Math
+        if "rectangle" in tname:
+            rx = getattr(shape, 'rx', 1.0)
+            ry = getattr(shape, 'ry', 1.0)
+            if tname == "rounded_rectangle":
+                cr = min(rx, ry) * 0.25
+                dx = torch.clamp(torch.abs(xr) - (rx - cr), min=0.0)
+                dy = torch.clamp(torch.abs(yr) - (ry - cr), min=0.0)
+                mask = (torch.abs(xr) <= rx) & (torch.abs(yr) <= ry) & (~((dx > 0) & (dy > 0) & ((dx ** 2 + dy ** 2) > cr ** 2)))
+            else:
+                mask = (torch.abs(xr) <= rx) & (torch.abs(yr) <= ry)
+                
+        # 3. HalfEllipse / Semicircle Math
+        elif tname == "half_ellipse":
+            rx = getattr(shape, 'rx', 1.0)
+            ry = getattr(shape, 'ry', 1.0)
+            dx, dy = xr / max(rx, 1e-6), yr / max(ry, 1e-6)
+            mask = ((dx ** 2 + dy ** 2) <= 1.0) & (yr >= 0.0)
+            
+        # 4. Standard Ellipse and Circle Math
+        else:
+            rx = getattr(shape, 'rx', getattr(shape, 'r', 1.0))
+            ry = getattr(shape, 'ry', getattr(shape, 'r', 1.0))
+            
+            # Apply ellipse size correction for consistent GPU/game evaluation
+            rx, ry = compensated_ellipse_size(rx, ry)
+            
+            dx, dy = xr / max(rx, 1e-6), yr / max(ry, 1e-6)
+            mask = (dx ** 2 + dy ** 2) <= 1.0
+            
     return (mask.to(torch.uint8) * 255), bbox
 
 def compute_diff_sq_sum_gpu(canvas: torch.Tensor, target: torch.Tensor, alpha_mask: torch.Tensor | None) -> Tuple[float, float]:
@@ -47,7 +120,6 @@ def compute_diff_sq_sum_gpu(canvas: torch.Tensor, target: torch.Tensor, alpha_ma
     
     if alpha_mask is not None:
         t_a = alpha_mask.float()
-        # Clean any fuzzy anti-aliased pixels to exactly 0 to match scoring constraints
         t_a = torch.where(t_a < 15.0, 0.0, t_a)
     else:
         t_a = torch.full_like(c_a, 255.0)
@@ -98,8 +170,6 @@ def score_shape_gpu(shape: Shape, canvas: torch.Tensor, target: torch.Tensor, al
     
     if alpha_mask is not None:
         target_alpha_region = alpha_mask[y0:y1, x0:x1].float()
-        # Enforce zero-tolerance constraint on anti-aliased fringe pixels (alpha < 15)
-        # Any overlap, even by a faint shape, results in instant rejection
         if ((mask_local > 0) & (target_alpha_region < 15.0)).any(): 
             return float('inf'), (128, 128, 128, 255)
         target_alpha_region = target_alpha_region.unsqueeze(-1)

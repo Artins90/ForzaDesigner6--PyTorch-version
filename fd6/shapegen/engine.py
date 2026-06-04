@@ -1,3 +1,5 @@
+# --- START OF FILE engine.py ---
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -53,7 +55,10 @@ class Engine:
         gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
         grad_mag = np.sqrt(gx**2 + gy**2)
 
-        angle_map = (np.degrees(np.arctan2(gy, gx)) + 90.0) % 180.0
+        # Smooth gradients to prevent micro-aliasing angle noise on thin lines
+        gy_smooth = cv2.GaussianBlur(gy, (5, 5), 0)
+        gx_smooth = cv2.GaussianBlur(gx, (5, 5), 0)
+        angle_map = (np.degrees(np.arctan2(gy_smooth, gx_smooth)) + 90.0) % 180.0
 
         grad_mass = cv2.GaussianBlur(grad_mag, (5, 5), 0)
         if grad_mass.max() > 0: grad_mass /= grad_mass.max()
@@ -110,7 +115,6 @@ class Engine:
         if alpha_mask is not None:
             interior = (alpha_mask > 128).astype(float)
             attention = attention * (0.1 + interior * 0.9)
-            # Clip candidate center generation completely outside anti-aliased bounds
             attention[alpha_mask < 15] = 0.0
 
         return attention.astype(np.float32)[..., None], angle_map, lap_blur
@@ -204,20 +208,26 @@ class Engine:
         ix = int(max(0, min(self.w - 1, cx)))
         local_priority = float(self.attention_map_cpu[iy, ix, 0])
         
-        max_r_flat = self.w / 4.0
-        max_r_detail = max(3.0, (self.w / 2.0) * (rms_ratio ** 1.5))
-        local_max_r = max_r_flat * (1.0 - local_priority) + max_r_detail * local_priority
+        # Saliency edge guidance bias
+        edge_weight = float(self.lap_blur_map_cpu[iy, ix])
+        max_len = max(30.0, self.w * 0.80)  # Raised max length to 80% of width for lines
 
         if hasattr(shape, 'rx') and hasattr(shape, 'ry'):
-            if self.rng.random() < 0.60:
-                shape.ry = float(self.rng.uniform(0.5, max(1.5, local_max_r * 0.1)))
-                shape.rx = float(self.rng.uniform(15.0, self.w * 0.15))
+            # Elongation selection bias on high-contrast lines
+            if self.rng.random() < (0.60 + edge_weight * 0.30):
+                shape.ry = float(self.rng.uniform(0.5, max(2.0, local_priority * 0.05)))
+                shape.rx = float(self.rng.uniform(15.0, max_len))
                 
                 if hasattr(shape, 'angle'):
-                    base_angle = float(self.angle_map_cpu[cy, cx])
-                    shape.angle = float((base_angle + self.rng.gauss(0, 3.0)) % 180.0)
+                    base_angle = float(self.angle_map_cpu[iy, ix])
+                    # Reduce tangent jitter on verified sharp edges
+                    jitter = 1.5 if edge_weight > 0.4 else 5.0
+                    shape.angle = float((base_angle + self.rng.gauss(0, jitter)) % 180.0)
             else:
                 scale_factor = self.rng.random() ** 2.0
+                max_r_flat = self.w / 4.0
+                max_r_detail = max(3.0, (self.w / 2.0) * (rms_ratio ** 1.5))
+                local_max_r = max_r_flat * (1.0 - local_priority) + max_r_detail * local_priority
                 shape.rx = float(1.0 + (local_max_r * scale_factor))
                 shape.ry = float(1.0 + (local_max_r * scale_factor))
                 
@@ -264,8 +274,9 @@ class Engine:
         
         is_elongated = getattr(best, 'rx', 0.0) > getattr(best, 'ry', 0.0) * 2.0
         
+        # Lifted max boundary caps to allow long straight lines
         if is_elongated:
-            max_rx_allowed = min(self.w * 0.25, getattr(best, 'rx', local_max_r) * 1.5 + 2.0)
+            max_rx_allowed = min(self.w * 0.85, getattr(best, 'rx', local_max_r) * 1.8 + 5.0)
         else:
             max_rx_allowed = min(local_max_r, getattr(best, 'rx', local_max_r) * 1.5 + 2.0)
             
@@ -347,7 +358,7 @@ class Engine:
         is_elongated = getattr(best, 'rx', 0.0) > getattr(best, 'ry', 0.0) * 2.0
         
         if is_elongated:
-            max_rx_allowed = min(self.w * 0.25, getattr(best, 'rx', local_max_r) * 1.5 + 2.0)
+            max_rx_allowed = min(self.w * 0.85, getattr(best, 'rx', local_max_r) * 1.8 + 5.0)
         else:
             max_rx_allowed = min(local_max_r, getattr(best, 'rx', local_max_r) * 1.5 + 2.0)
             
@@ -613,3 +624,5 @@ class PostOptimizeWorker(QObject):
         except Exception as exc:
             self.status.emit(f"Error: {exc}", "error")
             self.error.emit(str(exc))
+
+# --- END OF FILE ---

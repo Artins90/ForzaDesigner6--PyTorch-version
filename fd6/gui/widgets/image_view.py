@@ -1,7 +1,8 @@
+# --- START OF FILE image_view.py ---
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QLabel, QSizePolicy
 
@@ -13,21 +14,22 @@ class ImageView(QLabel):
         super().__init__(placeholder, parent)
         self.setAlignment(Qt.AlignCenter)
         self.setMinimumSize(160, 120)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.setStyleSheet("QLabel { background: #181818; color: #555; border: 1px solid #2a2a2a; }")
         self._pix: QPixmap | None = None
 
-    def set_numpy(self, arr: np.ndarray) -> None:
-        """Display an HxWx3 (RGB) or HxWx4 (RGBA) numpy array.
+    # Pins the widget layout requests so big images never inflate window bounds
+    def sizeHint(self) -> QSize:
+        return QSize(160, 120)
 
-        Sticker-mode preview emits RGBA so the canvas's transparent regions
-        render as the pane background instead of a solid grey rectangle —
-        matching how the Source view displays the same PNG.
-        """
+    def minimumSizeHint(self) -> QSize:
+        return QSize(160, 120)
+
+    def set_numpy(self, arr: np.ndarray) -> None:
+        """Display an HxWx3 (RGB) or HxWx4 (RGBA) numpy array."""
         if arr.ndim != 3 or arr.shape[2] not in (3, 4):
             return
         h, w, c = arr.shape
-        # QImage expects bytes contiguous; force a copy when not already.
         if not arr.flags["C_CONTIGUOUS"]:
             arr = np.ascontiguousarray(arr)
         if c == 4:

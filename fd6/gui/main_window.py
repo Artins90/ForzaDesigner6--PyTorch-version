@@ -1,3 +1,4 @@
+# --- START OF FILE main_window.py ---
 from __future__ import annotations
 
 import math
@@ -7,7 +8,7 @@ from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QIcon
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QHBoxLayout, QMainWindow, QMessageBox, 
-    QSplitter, QStatusBar, QVBoxLayout, QWidget, QStackedWidget
+    QScrollArea, QSplitter, QStatusBar, QVBoxLayout, QWidget, QStackedWidget
 )
 
 from fd6.gui.brand_banner import BrandBanner, badge_path
@@ -21,7 +22,6 @@ from fd6.shapegen.shapes import Shape
 from fd6.shapegen.worker import GenerationWorker
 from fd6.inject.fh6_injector import patterns_are_populated, FH6_TARGET_BUILD
 
-# Fallback structures to handle suite-swapping imports safely
 try:
     from fd6.gui.suite import SuiteMode, SUITE_DISPLAY, save_suite_mode, load_suite_mode, GameSuiteDialog
 except ImportError:
@@ -48,7 +48,6 @@ class MainWindow(QMainWindow):
         self.setStatusBar(QStatusBar(self))
         self._apply_dark_palette()
 
-        # Load persisted suite mode if defined
         try:
             self._suite_mode = load_suite_mode()
             self._suite_first_launch = False
@@ -62,7 +61,7 @@ class MainWindow(QMainWindow):
         self.queue = QueuePanel(self)
         self.settings_panel = SettingsPanel(self)      
 
-        # UI Stacking configuration to support multi-game modes safely
+        # UI Stacking configuration
         self.preview_stack = QStackedWidget(self)
         self.preview_stack.addWidget(self.preview)
         try:
@@ -73,12 +72,13 @@ class MainWindow(QMainWindow):
             self.ac_preview = QWidget(self)
             self.preview_stack.addWidget(self.ac_preview)
 
+        # Wrap tall settings pages in vertical scroll areas so they never grow window bounds
         self.settings_stack = QStackedWidget(self)
-        self.settings_stack.addWidget(self.settings_panel)
+        self.settings_stack.addWidget(self._scrollable(self.settings_panel))
         try:
             from fd6.gui.ac_settings import ACSettingsPanel
             self.ac_settings = ACSettingsPanel(self)
-            self.settings_stack.addWidget(self.ac_settings)
+            self.settings_stack.addWidget(self._scrollable(self.ac_settings))
         except ImportError:
             class DummyACSettings:
                 export_clicked = type('Dummy', (), {'connect': lambda self, f: None})()
@@ -96,22 +96,23 @@ class MainWindow(QMainWindow):
         center_layout.addWidget(vsplit)
 
         hsplit = QSplitter(Qt.Horizontal, self)
-        hsplit.addWidget(self.upload)
+        hsplit.addWidget(self._scrollable(self.upload))
         hsplit.addWidget(center)
         hsplit.addWidget(self.settings_stack)
 
         hsplit.setSizes([240, 760, 280])
         self.setCentralWidget(hsplit)
 
-        # Wire signals — Forza paths (unchanged)
+        # Signal connections
         self.upload.files_selected.connect(self._on_files_selected)
         self.upload.json_loaded.connect(self._on_json_loaded_for_preview)
         self.upload.download_json_requested.connect(self._on_download_json)
+        self.queue.download_requested.connect(self._on_queue_download_json)
         self.settings_panel.start_clicked.connect(self._start_next)
         self.settings_panel.pause_clicked.connect(self._toggle_pause)
         self.settings_panel.stop_clicked.connect(self._stop_current)
         self.settings_panel.inject_clicked.connect(self._on_inject_clicked)
-        self.settings_panel.wiggle_clicked.connect(self._on_post_optimize_clicked)  # Wiggle signal mapping
+        self.settings_panel.wiggle_clicked.connect(self._on_post_optimize_clicked)  
         
         # AC path
         self.ac_settings.export_clicked.connect(self._on_ac_export_clicked)
@@ -120,19 +121,16 @@ class MainWindow(QMainWindow):
         self._worker = None
         self._thread: QThread | None = None
         self._current_path: Path | None = None
+        self._current_uid: int | None = None  
         self._current_profile: Profile | None = None
         self._last_finished_json: Path | None = None  
         self._loaded_json_path: Path | None = None    
         self._inject_worker = None  
         self._inject_thread: QThread | None = None
 
-        # Menus / shortcuts
         self._build_menus()
-
-        # Wire FH6 inject gating
         self._refresh_inject_button()
 
-        # Floating brand banner in bottom-left (toggleable)
         self.brand_banner = BrandBanner(self)
         self.brand_banner.show()
         
@@ -142,7 +140,6 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(QIcon(str(_bp)))
             self.brand_banner.set_badge(_bp)
 
-        # Decorative particle overlay
         from fd6.gui.particles import ParticleOverlay
         self.particles = ParticleOverlay(self)
         _pal = THEMES.get(_saved_theme, THEMES["Default"])
@@ -160,7 +157,6 @@ class MainWindow(QMainWindow):
         self._apply_suite_mode(self._suite_mode)
         self._suite_popup_shown_this_session = False
 
-        # Background music
         from fd6.gui.music import MusicPlayer
         self.music = MusicPlayer(self)
         self.music.state_changed.connect(self._on_music_state)
@@ -187,7 +183,16 @@ class MainWindow(QMainWindow):
         self._sync_volume_check(self.music.volume())
 
     def _apply_dark_palette(self) -> None:
+        from PySide6.QtWidgets import QApplication
         apply_theme(QApplication.instance(), saved_theme_name())
+
+    def _scrollable(self, widget: QWidget) -> QScrollArea:
+        sa = QScrollArea(self)
+        sa.setWidgetResizable(True)
+        sa.setFrameShape(QScrollArea.NoFrame)
+        sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sa.setWidget(widget)
+        return sa
 
     def _build_menus(self) -> None:
         mbar = self.menuBar()
@@ -198,12 +203,10 @@ class MainWindow(QMainWindow):
         open_act.triggered.connect(self.upload._on_upload_clicked)
         file_menu.addAction(open_act)
 
-        # --- DYNAMIC RESUME GENERATION MENU ITEM ---
         resume_act = QAction("&Resume Generation…", self)
         resume_act.setShortcut(QKeySequence("Ctrl+R"))
         resume_act.triggered.connect(self._on_resume_triggered)
         file_menu.addAction(resume_act)
-        # --------------------------------------------
 
         quit_act = QAction("&Quit", self)
         quit_act.setShortcut(QKeySequence("Ctrl+Q"))
@@ -516,10 +519,16 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self,
             "About Forza Designer 6+",
-            f"<b>Forza Designer 6+</b><br>v0.3.5<br>"
-            f"<i>For Forza Horizon 3 / 4 / 5 / 6 (FH6 build {FH6_TARGET_BUILD})</i><br><br>"
-            "Live memory injection of vinyl-group shapes into Forza Horizon (position, scale, rotation, color).<br><br>"
-            "v0.3.5 highlights: Added support for Pure CUDA/PyTorch rendering, Saliency Attention Bias, Adaptive Sizing and Universal Brush Strokes."
+            f"<b>Forza Designer 6+</b><br>v0.5.0<br>"
+            f"<i>For Forza Horizon 3 / 4 / 5 / 6 (FH6 build {FH6_TARGET_BUILD}) "
+            f"and Assetto Corsa Competizione</i><br><br>"
+            "Multi-game livery suite. Forza titles: live memory injection of "
+            "vinyl-group shapes (position, scale, rotation, color). Assetto "
+            "Corsa Competizione: file-based PNG livery export to the user's "
+            "Documents folder.<br><br>"
+            "Inspired by forza-painter (the_adawg), built on the techniques of "
+            "geometrize-lib (Sam Twidale) and Primitive (Michael Fogleman). "
+            "LiveryGroup discovery approach adapted from bvzrays/forza-painter-fh6.<br><br>"
         )
 
     def _refresh_inject_button(self) -> None:
@@ -573,16 +582,17 @@ class MainWindow(QMainWindow):
     def _start_next(self) -> None:
         if self._worker is not None:
             return  
-        next_path = self.queue.pop_next_queued()
-        if next_path is None:
+        nxt = self.queue.pop_next_queued()
+        if nxt is None:
             self.statusBar().showMessage("Nothing queued.")
             return
-        
+        next_uid, next_path = nxt
         profile = self.settings_panel.build_profile()
         self._current_path = next_path
+        self._current_uid = next_uid
         self._current_profile = profile
         self.preview.set_source(next_path)
-        self.queue.set_status(next_path, "running")
+        self.queue.set_status(next_uid, "running")
 
         add_white_bg = self.settings_panel.sticker_mode_cb.isChecked()
         self._worker = GenerationWorker(next_path, profile, sticker_mode=not add_white_bg)
@@ -600,19 +610,20 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Generating: {next_path.name}")
 
     def _on_finished(self, out_path: str) -> None:
-        if self._current_path:
-            self.queue.set_status(self._current_path, "done")
+        if self._current_uid is not None:
+            self.queue.set_json_path(self._current_uid, Path(out_path))
+            self.queue.set_status(self._current_uid, "done")
         self._last_finished_json = Path(out_path)
         self.statusBar().showMessage(f"Saved: {out_path}", 8000)
         self.upload.mark_json_ready(self._last_finished_json)
-        self.settings_panel.wiggle_btn.setEnabled(True)  # Enable Wiggle post-generation
+        self.settings_panel.wiggle_btn.setEnabled(True)  
         self._loaded_json_path = self._last_finished_json
         self._teardown_thread()
         self._start_next()
 
     def _on_error(self, msg: str) -> None:
-        if self._current_path:
-            self.queue.set_status(self._current_path, "error")
+        if self._current_uid is not None:
+            self.queue.set_status(self._current_uid, "error")
         QMessageBox.critical(self, "Generation error", msg)
         self._teardown_thread()
 
@@ -623,6 +634,7 @@ class MainWindow(QMainWindow):
         self._worker = None
         self._thread = None
         self._current_path = None
+        self._current_uid = None
         self.settings_panel.set_running(False)
         self.settings_panel.pause_btn.setChecked(False)
 
@@ -670,7 +682,7 @@ class MainWindow(QMainWindow):
         )
         self.preview.progress.setValue(100)
         self._loaded_json_path = json_path
-        self.settings_panel.wiggle_btn.setEnabled(True)  # Enable manual post-optimization button
+        self.settings_panel.wiggle_btn.setEnabled(True)  
         self.statusBar().showMessage(f"Preview ready. Click 'Inject into FH6' or 'Post-Optimize Loaded JSON'.", 8000)
 
     def _on_inject_json_path(self, json_path: Path) -> None:
@@ -762,11 +774,25 @@ class MainWindow(QMainWindow):
         if not self._last_finished_json or not self._last_finished_json.exists():
             QMessageBox.information(self, "No JSON yet", "No completed generation yet. Generate from an image first (or use Upload JSON to load an existing one).")
             return
-        dest, _ = QFileDialog.getSaveFileName(self, "Save shapes JSON as…", self._last_finished_json.name, "FD6 shapes (*.json);;All files (*)")
+        self._save_json_copy(self._last_finished_json)
+
+    def _on_queue_download_json(self, uid: int) -> None:
+        json_path = self.queue.json_path_for(uid)
+        if not json_path or not Path(json_path).exists():
+            QMessageBox.information(
+                self, "No JSON for this item",
+                "This queue item hasn't finished generating, or its JSON is missing."
+            )
+            return
+        self._save_json_copy(Path(json_path))
+
+    def _save_json_copy(self, src: Path) -> None:
+        import shutil
+        dest, _ = QFileDialog.getSaveFileName(self, "Save shapes JSON as…", src.name, "FD6 shapes (*.json);;All files (*)")
         if not dest:
             return
         try:
-            shutil.copy2(str(self._last_finished_json), dest)
+            shutil.copy2(str(src), dest)
             self.statusBar().showMessage(f"Exported to {dest}", 6000)
         except Exception as exc:
             QMessageBox.critical(self, "Save failed", f"{type(exc).__name__}: {exc}")
@@ -854,9 +880,7 @@ class MainWindow(QMainWindow):
             pass
         super().closeEvent(event)
 
-    # --- DYNAMIC RESUME GENERATION SYSTEM ---
     def _on_resume_triggered(self) -> None:
-        """Triggered via Ctrl+R. Handles partial JSON and source image selection."""
         json_path_str, _ = QFileDialog.getOpenFileName(
             self, "Select partial FD6 JSON to resume", "", "FD6 shapes (*.json);;All files (*)"
         )
@@ -888,18 +912,15 @@ class MainWindow(QMainWindow):
         self._start_resume(json_path, image_path, doc, shapes)
 
     def _start_resume(self, json_path: Path, image_path: Path, doc: FD6Document, shapes: list[Shape]) -> None:
-        """Configures the worker with the loaded shapes and begins the GPU pipeline."""
         if self._worker is not None:
             QMessageBox.warning(self, "Generation in progress", "Please stop or wait for the current generation to finish first.")
             return
 
         from fd6.shapegen.profile import load_profile_from_file, list_bundled_profiles
         
-        # 1. Capture the newly configured stop_at shape limit from your UI settings panel
         ui_profile = self.settings_panel.build_profile()
         ui_stop_at = ui_profile.stop_at
 
-        # 2. Load the old profile settings (incompatible parameters, etc.)
         profile = ui_profile
         if doc.profile:
             for p_path in list_bundled_profiles():
@@ -910,10 +931,9 @@ class MainWindow(QMainWindow):
                         pass
                     break
 
-        # 3. Strictly override stop_at to use the newly configured UI value
         profile.stop_at = ui_stop_at
         if profile.stop_at <= len(shapes):
-            profile.stop_at = len(shapes) + 1000  # Auto-extend if target limit is reached
+            profile.stop_at = len(shapes) + 1000  
 
         self._current_path = image_path
         self._current_profile = profile
@@ -922,18 +942,16 @@ class MainWindow(QMainWindow):
         output_dir = json_path.parent
         add_white_bg = self.settings_panel.sticker_mode_cb.isChecked()
 
-        # Instantiate GenerationWorker with the seed shapes
         self._worker = GenerationWorker(
             image_path, profile, output_dir=output_dir, 
             sticker_mode=not add_white_bg, seed_shapes=shapes,
-            target_size=doc.image_size  # Passes exact target dimensions to prevent coordinate warping
+            target_size=doc.image_size  
         )
 
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         
-        # Wire standard signals
         self._worker.progress.connect(self.preview.on_progress)
         self._worker.preview.connect(self.preview.on_preview)
         self._worker.checkpoint_written.connect(lambda p: self.statusBar().showMessage(f"Checkpoint: {p}", 4000))
@@ -945,13 +963,10 @@ class MainWindow(QMainWindow):
         self.settings_panel.set_running(True)
         self.statusBar().showMessage(f"Resuming generation ({len(shapes)} shapes): {image_path.name}")
 
-    # --- MANUAL POST-OPTIMIZATION "WIGGLE & RECLAIM" SYSTEM ---
     def _on_post_optimize_clicked(self) -> None:
-        """Triggered when the user clicks 'Post-Optimize Loaded JSON'."""
         if not self._loaded_json_path or not self._loaded_json_path.exists():
             return
             
-        # 1. Prompt the user to select the original source image (required to score pixels)
         image_path_str, _ = QFileDialog.getOpenFileName(
             self, f"Select original source image for {self._loaded_json_path.name}", 
             str(self._loaded_json_path.parent), 
@@ -964,7 +979,6 @@ class MainWindow(QMainWindow):
         self._start_post_optimization(self._loaded_json_path, image_path)
 
     def _start_post_optimization(self, json_path: Path, image_path: Path) -> None:
-        """Launches the background QThread worker to perform the wiggle & reclaim sweep."""
         if self._worker is not None:
             QMessageBox.warning(self, "Generation in progress", "Please stop or wait for the current generation to finish first.")
             return
@@ -981,10 +995,9 @@ class MainWindow(QMainWindow):
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         
-        # Connect standard UI feedback slots
         self._worker.progress.connect(self.preview.on_progress)
         self._worker.preview.connect(self.preview.on_preview)
-        self._worker.status.connect(self._on_inject_status)  # routes status to status bar
+        self._worker.status.connect(self._on_inject_status)  
         self._worker.finished.connect(self._on_post_optimize_finished)
         self._worker.error.connect(self._on_error)
         
@@ -992,10 +1005,9 @@ class MainWindow(QMainWindow):
         self.settings_panel.set_running(True)
 
     def _on_post_optimize_finished(self, out_path_str: str) -> None:
-        """Called when post-optimization finishes. Saves with '_wiggled' suffix."""
         self._last_finished_json = Path(out_path_str)
         self.upload.mark_json_ready(self._last_finished_json)
-        self._on_json_loaded_for_preview(self._last_finished_json)  # Load optimized result into the preview canvas
+        self._on_json_loaded_for_preview(self._last_finished_json)  
         self._teardown_thread()
         QMessageBox.information(
             self, "Optimization complete", 

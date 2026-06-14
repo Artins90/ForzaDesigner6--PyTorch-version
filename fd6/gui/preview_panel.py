@@ -1,10 +1,11 @@
+# --- START OF FILE preview_panel.py ---
 from __future__ import annotations
 
 from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QProgressBar, QVBoxLayout, QWidget, QSplitter
+    QHBoxLayout, QLabel, QProgressBar, QVBoxLayout, QWidget, QSplitter, QSizePolicy
 )
 
 from fd6.gui.widgets import ImageView
@@ -27,6 +28,10 @@ class PreviewPanel(QWidget):
         info_row = QHBoxLayout()
         self.status_label = QLabel("Idle.", self)
         self.status_label.setStyleSheet("color: #aaa;")
+        
+        # Ignores text width so long description labels never inflate window height
+        self.status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        
         self.progress = QProgressBar(self)
         self.progress.setRange(0, 100)
         self.progress.setValue(0)

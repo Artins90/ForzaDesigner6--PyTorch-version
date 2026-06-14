@@ -79,7 +79,8 @@ class GenerationWorker(QObject):
             if self.target_size is not None:
                 img = img.resize(self.target_size, Image.LANCZOS)
                 if alpha_mask is not None:
-                    am_img = Image.fromarray(alpha_mask, "L").resize(self.target_size, Image.LANCZOS)
+                    # Bilinear is more robust for masks to prevent Lanczos ringing artifacts
+                    am_img = Image.fromarray(alpha_mask, "L").resize(self.target_size, Image.BILINEAR)
                     alpha_mask = np.asarray(am_img, dtype=np.uint8)
             else:
                 mr = self.profile.max_resolution
@@ -88,7 +89,8 @@ class GenerationWorker(QObject):
                     new_size = (max(1, int(img.size[0] * scale)), max(1, int(img.size[1] * scale)))
                     img = img.resize(new_size, Image.LANCZOS)
                     if alpha_mask is not None:
-                        am_img = Image.fromarray(alpha_mask, "L").resize(new_size, Image.LANCZOS)
+                        # Bilinear is more robust for masks to prevent Lanczos ringing artifacts
+                        am_img = Image.fromarray(alpha_mask, "L").resize(new_size, Image.BILINEAR)
                         alpha_mask = np.asarray(am_img, dtype=np.uint8)
             target = np.asarray(img, dtype=np.uint8)
 

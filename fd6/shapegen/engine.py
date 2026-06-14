@@ -1,5 +1,3 @@
-# --- START OF FILE engine.py ---
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -56,9 +54,9 @@ class Engine:
         gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
         grad_mag = np.sqrt(gx**2 + gy**2)
 
-        # Smooth gradients to prevent micro-aliasing angle noise on thin lines
-        gy_smooth = cv2.GaussianBlur(gy, (5, 5), 0)
-        gx_smooth = cv2.GaussianBlur(gx, (5, 5), 0)
+        # High-precision gradient orientation smoothing (3x3) to preserve thin lines and corners
+        gy_smooth = cv2.GaussianBlur(gy, (3, 3), 0)
+        gx_smooth = cv2.GaussianBlur(gx, (3, 3), 0)
         angle_map = (np.degrees(np.arctan2(gy_smooth, gx_smooth)) + 90.0) % 180.0
 
         grad_mass = cv2.GaussianBlur(grad_mag, (5, 5), 0)
@@ -132,14 +130,25 @@ class Engine:
         self.profile = config.profile
         self.h, self.w = target_rgb.shape[:2]
         
-        # Precompute resolution-adaptive size decay exponent
-        # Relaxes scale limitations on high resolutions to prevent pixel-level aliasing fragmentation
         self.size_decay_exponent = max(1.1, min(1.5, 1.4 - 0.1 * math.log2(max(1.0, self.w / 1024.0))))
         
         if alpha_mask is None:
             alpha_mask = np.full((self.h, self.w), 255, dtype=np.uint8)
 
         self.attention_map_cpu, self.angle_map_cpu, self.lap_blur_map_cpu = self._build_attention_map(target_rgb, alpha_mask)
+        self.attention_map_static = self.attention_map_cpu.copy()  # Holds static structural reference
+
+        # Unified and secure seeding across standard, numpy, and pytorch libraries
+        self.rng = random.Random(config.seed or int(time.time() * 1000) & 0xFFFFFFFF)
+        np_seed = self.rng.randint(0, 0xFFFFFFFF)
+        np.random.seed(np_seed)
+        torch.manual_seed(np_seed)
+
+        # Vectorized attention coordinate selection setup
+        flat_attn = self.attention_map_cpu[..., 0].flatten().copy()
+        flat_attn = flat_attn + 0.005
+        self.attn_probs = flat_attn / flat_attn.sum()
+        self.attn_indices = np.arange(len(self.attn_probs))
 
         self.alpha_mask_t = torch.from_numpy(alpha_mask.copy()).cuda()
         target_a = self.alpha_mask_t.float().unsqueeze(-1) / 255.0
@@ -155,7 +164,28 @@ class Engine:
         
         self._stop = False
         self._pause = False
-        self.rng = random.Random(config.seed or int(time.time() * 1000) & 0xFFFFFFFF)
+
+    def _update_attention_map_with_error(self) -> None:
+        """Every N shapes, blends the static attention map with the current target absolute error map."""
+        with torch.no_grad():
+            diff = torch.abs(self.canvas[..., :3].float() - self.target.float())
+            error_map_t = torch.mean(diff, dim=-1)
+            max_err = error_map_t.max()
+            if max_err > 0.0:
+                error_map_t = error_map_t / max_err
+            error_map_cpu = error_map_t.cpu().numpy()
+
+        import cv2
+        error_map_smoothed = cv2.GaussianBlur(error_map_cpu, (15, 15), 0)
+
+        # 30% static contrast memory + 70% active error map focus
+        self.attention_map_cpu = (self.attention_map_static * 0.3 + error_map_smoothed[..., None] * 0.7).astype(np.float32)
+
+        # Re-compute coordinate sampling cumulative distributions
+        flat_attn = self.attention_map_cpu[..., 0].flatten().copy()
+        flat_attn = flat_attn + 0.005
+        self.attn_probs = flat_attn / flat_attn.sum()
+        self.attn_indices = np.arange(len(self.attn_probs))
 
     def _get_progressive_alpha_bounds(self, rms_ratio: float, local_priority: float) -> tuple[int, int]:
         min_alpha_start, min_alpha_end = 180, 30
@@ -199,13 +229,18 @@ class Engine:
         
         cx, cy = self.rng.randrange(self.w), self.rng.randrange(self.h)
         if self.rng.random() >= uniform_ratio:
-            for _ in range(150):
-                tx, ty = self.rng.randrange(self.w), self.rng.randrange(self.h)
-                prob = self.attention_map_cpu[ty, tx, 0] / 3.0
-                floor = (rms_ratio ** 2.0) * 0.5
-                if self.rng.random() < (prob + floor):
-                    cx, cy = tx, ty
-                    break
+            tx = np.random.randint(0, self.w, size=150)
+            ty = np.random.randint(0, self.h, size=150)
+            
+            probs = self.attention_map_cpu[ty, tx, 0] / 3.0
+            floor = (rms_ratio ** 2.0) * 0.5
+            thresholds = probs + floor
+            
+            rand_vals = np.random.random(size=150)
+            passed_indices = np.where(rand_vals < thresholds)[0]
+            if len(passed_indices) > 0:
+                first_pass = passed_indices[0]
+                cx, cy = int(tx[first_pass]), int(ty[first_pass])
                     
         shape.x, shape.y = float(cx), float(cy)
 
@@ -213,29 +248,32 @@ class Engine:
         ix = int(max(0, min(self.w - 1, cx)))
         local_priority = float(self.attention_map_cpu[iy, ix, 0])
         
-        # Saliency edge guidance bias
         edge_weight = float(self.lap_blur_map_cpu[iy, ix])
-        max_len = max(30.0, self.w * 0.80)  # Raised max length to 80% of width for lines
+        max_len = max(30.0, self.w * 0.80)
 
         if hasattr(shape, 'rx') and hasattr(shape, 'ry'):
-            # Elongation selection bias on high-contrast lines
             if self.rng.random() < (0.60 + edge_weight * 0.30):
-                shape.ry = float(self.rng.uniform(0.5, max(2.0, local_priority * 0.05)))
-                shape.rx = float(self.rng.uniform(15.0, max_len))
+                shape.ry = float(self.rng.uniform(0.25, max(2.0, local_priority * 0.05)))
+                
+                # Adaptive length exponent
+                progress = len(self.shapes) / max(1, self.profile.stop_at)
+                exponent = 1.2 + 1.8 * progress
+                
+                min_rx = 3.0
+                max_rx = max_len
+                shape.rx = float(min_rx + (max_rx - min_rx) * (self.rng.random() ** exponent))
                 
                 if hasattr(shape, 'angle'):
                     base_angle = float(self.angle_map_cpu[iy, ix])
-                    # Reduce tangent jitter on verified sharp edges
                     jitter = 1.5 if edge_weight > 0.4 else 5.0
                     shape.angle = float((base_angle + self.rng.gauss(0, jitter)) % 180.0)
             else:
                 scale_factor = self.rng.random() ** 2.0
                 max_r_flat = self.w / 4.0
-                # Using the computed resolution-adaptive size decay exponent
                 max_r_detail = max(3.0, (self.w / 2.0) * (rms_ratio ** self.size_decay_exponent))
                 local_max_r = max_r_flat * (1.0 - local_priority) + max_r_detail * local_priority
-                shape.rx = float(1.0 + (local_max_r * scale_factor))
-                shape.ry = float(1.0 + (local_max_r * scale_factor))
+                shape.rx = float(0.25 + (local_max_r * scale_factor))
+                shape.ry = float(0.25 + (local_max_r * scale_factor))
                 
         elif hasattr(shape, 'r'):
             global_max_r = max(2.5, (self.w / 2.0) * (rms_ratio ** self.size_decay_exponent))
@@ -243,7 +281,7 @@ class Engine:
             local_max_r = max(2.5, global_max_r * size_multiplier)
             
             scale_factor = self.rng.random() ** 2.0
-            shape.r = float(1.0 + (local_max_r * scale_factor))
+            shape.r = float(0.25 + (local_max_r * scale_factor))
                 
         min_alpha, max_alpha = self._get_progressive_alpha_bounds(rms_ratio, local_priority)
         shape.color = (shape.color[0], shape.color[1], shape.color[2], self.rng.randint(min_alpha, max_alpha))
@@ -278,15 +316,21 @@ class Engine:
         size_multiplier = 1.0 - (0.85 * local_priority)
         local_max_r = max(3.0, global_max_r * size_multiplier)
         
-        is_elongated = getattr(best, 'rx', 0.0) > getattr(best, 'ry', 0.0) * 2.0
+        is_elongated = getattr(best, 'rx', 0.0) > getattr(best, 'ry', 0.0) * 1.5
         
-        # Lifted max boundary caps to allow long straight lines
         if is_elongated:
             max_rx_allowed = min(self.w * 0.85, getattr(best, 'rx', local_max_r) * 1.8 + 5.0)
         else:
             max_rx_allowed = min(local_max_r, getattr(best, 'rx', local_max_r) * 1.5 + 2.0)
             
         max_ry_allowed = min(local_max_r, getattr(best, 'ry', local_max_r) * 1.5 + 2.0)
+        
+        # Scale-aware position step size
+        shape_size = getattr(best, 'r', getattr(best, 'ry', getattr(best, 'rx', 16.0)))
+        step_std = max(1.5, min(16.0, shape_size * 0.25))
+        
+        progress = len(self.shapes) / max(1, self.profile.stop_at)
+        patience = max(15, int(100 * (1.0 - progress)))
         
         while iterations > 0 and not self._stop:
             mutations = []
@@ -300,12 +344,26 @@ class Engine:
                 
                 which = self.rng.randint(0, 2)
                 if which == 0:
-                    m.x = max(0.0, min(self.w - 1.0, m.x + self.rng.gauss(0, 16.0 * step_scale)))
-                    m.y = max(0.0, min(self.h - 1.0, m.y + self.rng.gauss(0, 16.0 * step_scale)))
+                    if hasattr(m, 'rx') and hasattr(m, 'ry') and hasattr(m, 'angle') and m.rx > m.ry * 1.5:
+                        rad = math.radians(m.angle)
+                        cos_a, sin_a = math.cos(rad), math.sin(rad)
+                        step_major = self.rng.gauss(0, 24.0 * step_scale)
+                        step_minor = self.rng.gauss(0, 1.5 * step_scale)
+                        m.x = max(0.0, min(self.w - 1.0, m.x + step_major * cos_a - step_minor * sin_a))
+                        m.y = max(0.0, min(self.h - 1.0, m.y + step_major * sin_a + step_minor * cos_a))
+                    else:
+                        m.x = max(0.0, min(self.w - 1.0, m.x + self.rng.gauss(0, step_std * step_scale)))
+                        m.y = max(0.0, min(self.h - 1.0, m.y + self.rng.gauss(0, step_std * step_scale)))
                 elif which == 1:
-                    if hasattr(m, 'rx'): m.rx = max(1.0, min(self.w, m.rx + self.rng.gauss(0, 16.0 * step_scale)))
-                    if hasattr(m, 'ry'): m.ry = max(1.0, min(self.h, m.ry + self.rng.gauss(0, 16.0 * step_scale)))
-                    if hasattr(m, 'r'): m.r = max(1.0, min(self.w, m.r + self.rng.gauss(0, 16.0 * step_scale)))
+                    if self.rng.random() < 0.5:
+                        scale_factor = math.exp(self.rng.gauss(0, 0.2 * step_scale))
+                        if hasattr(m, 'rx'): m.rx = max(0.25, min(self.w, m.rx * scale_factor))
+                        if hasattr(m, 'ry'): m.ry = max(0.25, min(self.h, m.ry * scale_factor))
+                        if hasattr(m, 'r'): m.r = max(0.25, min(self.w, m.r * scale_factor))
+                    else:
+                        if hasattr(m, 'rx'): m.rx = max(0.25, min(self.w, m.rx + self.rng.gauss(0, 16.0 * step_scale)))
+                        if hasattr(m, 'ry'): m.ry = max(0.25, min(self.h, m.ry + self.rng.gauss(0, 16.0 * step_scale)))
+                        if hasattr(m, 'r'): m.r = max(0.25, min(self.w, m.r + self.rng.gauss(0, 16.0 * step_scale)))
                 else:
                     if hasattr(m, 'angle'): m.angle = (m.angle + self.rng.gauss(0, 25.0 * step_scale)) % 180.0
                 
@@ -340,7 +398,7 @@ class Engine:
                 no_improve = 0
             else:
                 no_improve += 1
-                if no_improve >= max(20, batch_size // 4): break
+                if no_improve >= patience: break
             iterations -= batch_size
         return best
 
@@ -361,7 +419,7 @@ class Engine:
         size_multiplier = 1.0 - (0.85 * local_priority)
         local_max_r = max(3.0, global_max_r * size_multiplier)
         
-        is_elongated = getattr(best, 'rx', 0.0) > getattr(best, 'ry', 0.0) * 2.0
+        is_elongated = getattr(best, 'rx', 0.0) > getattr(best, 'ry', 0.0) * 1.5
         
         if is_elongated:
             max_rx_allowed = min(self.w * 0.85, getattr(best, 'rx', local_max_r) * 1.8 + 5.0)
@@ -369,6 +427,13 @@ class Engine:
             max_rx_allowed = min(local_max_r, getattr(best, 'rx', local_max_r) * 1.5 + 2.0)
             
         max_ry_allowed = min(local_max_r, getattr(best, 'ry', local_max_r) * 1.5 + 2.0)
+        
+        # Scale-aware position step size
+        shape_size = getattr(best, 'r', getattr(best, 'ry', getattr(best, 'rx', 16.0)))
+        step_std = max(1.5, min(16.0, shape_size * 0.25))
+        
+        progress = len(self.shapes) / max(1, self.profile.stop_at)
+        patience = max(15, int(100 * (1.0 - progress)))
         
         while iterations > 0 and not self._stop:
             mutations = []
@@ -382,12 +447,26 @@ class Engine:
                 
                 which = self.rng.randint(0, 2)
                 if which == 0:
-                    m.x = max(0.0, min(self.w - 1.0, m.x + self.rng.gauss(0, 16.0 * step_scale)))
-                    m.y = max(0.0, min(self.h - 1.0, m.y + self.rng.gauss(0, 16.0 * step_scale)))
+                    if hasattr(m, 'rx') and hasattr(m, 'ry') and hasattr(m, 'angle') and m.rx > m.ry * 1.5:
+                        rad = math.radians(m.angle)
+                        cos_a, sin_a = math.cos(rad), math.sin(rad)
+                        step_major = self.rng.gauss(0, 24.0 * step_scale)
+                        step_minor = self.rng.gauss(0, 1.5 * step_scale)
+                        m.x = max(0.0, min(self.w - 1.0, m.x + step_major * cos_a - step_minor * sin_a))
+                        m.y = max(0.0, min(self.h - 1.0, m.y + step_major * sin_a + step_minor * cos_a))
+                    else:
+                        m.x = max(0.0, min(self.w - 1.0, m.x + self.rng.gauss(0, step_std * step_scale)))
+                        m.y = max(0.0, min(self.h - 1.0, m.y + self.rng.gauss(0, step_std * step_scale)))
                 elif which == 1:
-                    if hasattr(m, 'rx'): m.rx = max(1.0, min(self.w, m.rx + self.rng.gauss(0, 16.0 * step_scale)))
-                    if hasattr(m, 'ry'): m.ry = max(1.0, min(self.h, m.ry + self.rng.gauss(0, 16.0 * step_scale)))
-                    if hasattr(m, 'r'): m.r = max(1.0, min(self.w, m.r + self.rng.gauss(0, 16.0 * step_scale)))
+                    if self.rng.random() < 0.5:
+                        scale_factor = math.exp(self.rng.gauss(0, 0.2 * step_scale))
+                        if hasattr(m, 'rx'): m.rx = max(0.25, min(self.w, m.rx * scale_factor))
+                        if hasattr(m, 'ry'): m.ry = max(0.25, min(self.h, m.ry * scale_factor))
+                        if hasattr(m, 'r'): m.r = max(0.25, min(self.w, m.r * scale_factor))
+                    else:
+                        if hasattr(m, 'rx'): m.rx = max(0.25, min(self.w, m.rx + self.rng.gauss(0, 16.0 * step_scale)))
+                        if hasattr(m, 'ry'): m.ry = max(0.25, min(self.h, m.ry + self.rng.gauss(0, 16.0 * step_scale)))
+                        if hasattr(m, 'r'): m.r = max(0.25, min(self.w, m.r + self.rng.gauss(0, 16.0 * step_scale)))
                 else:
                     if hasattr(m, 'angle'): m.angle = (m.angle + self.rng.gauss(0, 25.0 * step_scale)) % 180.0
                 
@@ -421,9 +500,48 @@ class Engine:
                 no_improve = 0
             else:
                 no_improve += 1
-                if no_improve >= max(20, batch_size // 4): break
+                if no_improve >= patience: break
             iterations -= batch_size
         return best
+
+    def optimize_and_reclaim_recent(self, last_k: int = 50) -> None:
+        if len(self.shapes) < last_k:
+            return
+        
+        retained_shapes = list(self.shapes[:-last_k])
+        shapes_to_check = self.shapes[-last_k:]
+        
+        import torch
+        from fd6.shapegen.gpu_scoring import composite_gpu
+        canvas_bg = torch.zeros((self.h, self.w, 4), dtype=torch.uint8, device='cuda')
+        for s in retained_shapes:
+            canvas_bg, _ = composite_gpu(canvas_bg, s, self.target, self.alpha_mask_t, recalculate_color=False)
+            
+        remaining_transparency = torch.ones((self.h, self.w), dtype=torch.float32, device='cuda')
+        retained_recent = []
+        for s in reversed(shapes_to_check):
+            mask_local, bbox = self._rasterize_shape_mask_only(s)
+            x0, y0, x1, y1 = bbox
+            if mask_local.numel() == 0:
+                continue
+            region_trans = remaining_transparency[y0:y1, x0:x1]
+            mask_bool = mask_local > 0
+            max_trans = region_trans[mask_bool].max().item() if mask_bool.any() else 0.0
+            
+            if max_trans < 0.02:  # original threshold
+                continue
+                
+            retained_recent.append(s)
+            
+            mask_coverage = mask_local[mask_bool].float() / 255.0
+            alpha_val = (s.color[3] / 255.0) * mask_coverage
+            region_trans[mask_bool] *= (1.0 - alpha_val)
+            
+        retained_recent.reverse()
+        self.shapes = retained_shapes + retained_recent
+        self.canvas = canvas_bg
+        for s in retained_recent:
+            self.canvas, self.rms = composite_gpu(self.canvas, s, self.target, self.alpha_mask_t, recalculate_color=False)
 
     def wiggle_and_prune(self, start_ratio: float = 0.0, iterations_per_shape: int = None, progress_callback=None) -> int:
         if not self.shapes: return 0
@@ -442,7 +560,9 @@ class Engine:
         num_to_optimize = len(self.shapes) - start_idx
         for k in range(start_idx, len(self.shapes)):
             if getattr(self, "_stop_check", lambda: False)(): break
+            
             current_diff_sq, n_px = compute_diff_sq_sum_gpu(canvas_bg, self.target, self.alpha_mask_t)
+            
             rms_before = _rms_error_gpu(canvas_bg, self.target, self.alpha_mask_t)
             old_shape = self.shapes[k]
             optimized_shape = self._hill_climb_on_background(old_shape, canvas_bg, iterations_per_shape, current_diff_sq, n_px)
@@ -467,12 +587,17 @@ class Engine:
             if getattr(self, "_stop_check", lambda: False)(): break
             rms_before = _rms_error_gpu(canvas_bg, self.target, self.alpha_mask_t)
             canvas_orig, rms_orig = composite_gpu(canvas_bg, self.shapes[k], self.target, self.alpha_mask_t, recalculate_color=False)
-            shape_promoted = self.shapes[k].with_color((*self.shapes[k].color[:3], 255))
-            canvas_promoted, rms_promoted = composite_gpu(canvas_bg, shape_promoted, self.target, self.alpha_mask_t, recalculate_color=False)
-            if rms_promoted <= rms_orig:
-                self.shapes[k] = shape_promoted
-                canvas_bg = canvas_promoted
-            else: canvas_bg = canvas_orig
+            
+            if self.shapes[k].color[3] > 200:
+                shape_promoted = self.shapes[k].with_color((*self.shapes[k].color[:3], 255))
+                canvas_promoted, rms_promoted = composite_gpu(canvas_bg, shape_promoted, self.target, self.alpha_mask_t, recalculate_color=False)
+                if rms_promoted <= rms_orig:
+                    self.shapes[k] = shape_promoted
+                    canvas_bg = canvas_promoted
+                else: canvas_bg = canvas_orig
+            else:
+                canvas_bg = canvas_orig
+                
             if progress_callback is not None and k % 50 == 0:
                 progress_callback(k, len(self.shapes), rms_before, self._get_numpy_canvas_from_state(canvas_bg))
 
@@ -484,13 +609,16 @@ class Engine:
             x0, y0, x1, y1 = bbox
             if mask_local.numel() == 0: continue
             region_trans = remaining_transparency[y0:y1, x0:x1]
-            max_trans = region_trans[mask_local].max().item() if mask_local.any() else 0.0
+            mask_bool = mask_local > 0
+            max_trans = region_trans[mask_bool].max().item() if mask_bool.any() else 0.0
             if max_trans < 0.02: continue
             retained_shapes.append(shape)
-            alpha_val = shape.color[3] / 255.0
-            region_trans[mask_local] *= (1.0 - alpha_val)
+            
+            mask_coverage = mask_local[mask_bool].float() / 255.0
+            alpha_val = (shape.color[3] / 255.0) * mask_coverage
+            region_trans[mask_bool] *= (1.0 - alpha_val)
+            
         retained_shapes.reverse()
-        self.shapes = retained_shapes
         self.canvas = torch.zeros((self.h, self.w, 4), dtype=torch.uint8, device='cuda')
         for s in self.shapes:
             self.canvas, self.rms = composite_gpu(self.canvas, s, self.target, self.alpha_mask_t, recalculate_color=False)
@@ -501,26 +629,33 @@ class Engine:
         return _rasterize_mask_gpu(shape, self.w, self.h)
 
     def _get_numpy_canvas_from_state(self, state_canvas: torch.Tensor) -> np.ndarray:
-        return state_canvas.cpu().numpy().copy()
+        canvas_modulated = state_canvas.clone()
+        canvas_modulated[..., 3] = (canvas_modulated[..., 3].float() * (self.alpha_mask_t.float() / 255.0)).to(torch.uint8)
+        return canvas_modulated.cpu().numpy().copy()
 
     def run(self) -> Iterable[EngineEvent]:
-        from fd6.shapegen.gpu_scoring import compute_diff_sq_sum_gpu, composite_gpu
+        from fd6.shapegen.gpu_scoring import composite_gpu, compute_diff_sq_sum_gpu
         p = self.profile
         types = [t for t in p.shape_types if t]
         if not types: types = ["rotated_ellipse"]
         save_at = set(p.save_at)
         consecutive_skips = 0
+        # Fixed skip limit (original behaviour) – ensures enough trials to reach low RMS
+        max_skip_base = 250
         try:
             while len(self.shapes) < p.stop_at and not self._stop:
                 while self._pause and not self._stop: time.sleep(0.05)
+                
                 current_diff_sq, n_px = compute_diff_sq_sum_gpu(self.canvas, self.target, self.alpha_mask_t)
+                
                 candidate = self._best_of_random(types, max(1, p.random_samples), current_diff_sq, n_px)
                 refined = self._hill_climb(candidate, max(1, p.mutated_samples), current_diff_sq, n_px)
+                
                 from fd6.shapegen.gpu_scoring import score_shape_gpu
                 rscore, _ = score_shape_gpu(refined, self.canvas, self.target, self.alpha_mask_t, current_diff_sq, n_px)
                 if rscore == float("inf") or rscore >= self.rms:
                     consecutive_skips += 1
-                    if consecutive_skips >= 250:
+                    if consecutive_skips >= max_skip_base:
                         yield EngineEvent(kind="done", shape_count=len(self.shapes), rms=self.rms, canvas=self._get_numpy_canvas(), message="Converged.")
                         return
                     continue
@@ -528,6 +663,14 @@ class Engine:
                 self.canvas, self.rms = composite_gpu(self.canvas, refined, self.target, self.alpha_mask_t)
                 self.shapes.append(refined)
                 count = len(self.shapes)
+                
+                if count > 0 and count % 200 == 0:
+                    self.optimize_and_reclaim_recent(last_k=50)
+                    count = len(self.shapes)
+                    
+                if count > 0 and count % 200 == 0:
+                    self._update_attention_map_with_error()
+
                 yield EngineEvent(kind="shape_committed", shape_count=count, rms=self.rms)
                 if p.preview_every and (count % p.preview_every == 0):
                     yield EngineEvent(kind="preview", shape_count=count, rms=self.rms, canvas=self._get_numpy_canvas())
@@ -538,7 +681,9 @@ class Engine:
 
     def _get_numpy_canvas(self) -> np.ndarray | None:
         if self.canvas is None: return None
-        return self.canvas.cpu().numpy().copy()
+        canvas_modulated = self.canvas.clone()
+        canvas_modulated[..., 3] = (canvas_modulated[..., 3].float() * (self.alpha_mask_t.float() / 255.0)).to(torch.uint8)
+        return canvas_modulated.cpu().numpy().copy()
 
 
 class PostOptimizeWorker(QObject):
@@ -630,5 +775,3 @@ class PostOptimizeWorker(QObject):
         except Exception as exc:
             self.status.emit(f"Error: {exc}", "error")
             self.error.emit(str(exc))
-
-# --- END OF FILE ---

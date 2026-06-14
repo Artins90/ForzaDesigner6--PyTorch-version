@@ -93,7 +93,9 @@ def score_shape(shape, current, target, alpha_mask=None, current_diff_sq=None, n
         opaque_body = region_alpha >= 128
         if not np.any(opaque_body): return float("inf"), shape.color
         inside = float(np.count_nonzero(shape_body & opaque_body)) 
-        if inside / max(true_area, 1.0) < STICKER_OVERLAP_MIN: return float("inf"), shape.color
+        
+        # Sticker overlap constraint based strictly on rasterized canvas_area
+        if inside / max(canvas_area, 1.0) < STICKER_OVERLAP_MIN: return float("inf"), shape.color
         effective_mask = np.minimum(mask_local, region_alpha)
         
     color = compute_optimal_color(region_tgt, region_cur, effective_mask, shape.color[3])
@@ -107,8 +109,17 @@ def score_shape(shape, current, target, alpha_mask=None, current_diff_sq=None, n
     diff_old = region_cur - region_tgt
     delta_sq = (diff_in ** 2) - (diff_old ** 2)
     
-    bleed_pixels = max(0.0, true_area - canvas_area - (true_area * 0.05))
-    bleed_penalty = bleed_pixels * (255.0 ** 2)
+    # Bleed penalty is only applied if the shape bounding box is clipped by canvas boundaries
+    rx_val = getattr(shape, 'rx', getattr(shape, 'r', 1.0))
+    ry_val = getattr(shape, 'ry', getattr(shape, 'r', 1.0))
+    is_clipped = (shape.x - rx_val < 0 or shape.x + rx_val > w or 
+                  shape.y - ry_val < 0 or shape.y + ry_val > h)
+                  
+    if not is_clipped:
+        bleed_penalty = 0.0
+    else:
+        bleed_pixels = max(0.0, true_area - canvas_area - (true_area * 0.05))
+        bleed_penalty = bleed_pixels * (255.0 ** 2)
     
     if alpha_mask is None:
         region_delta_sq = float(delta_sq.sum())
